@@ -11,12 +11,16 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+from packaging import version
+
 try:
     import snapml  # type: ignore
 
-    snapml_installed = True
+    snapml_version = version.parse(getattr(snapml, "__version__"))
+
 except ImportError:
-    snapml_installed = False
+    snapml_version = None
+
 
 import lale.datasets.data_schemas
 import lale.docstrings
@@ -24,63 +28,18 @@ import lale.operators
 
 
 class _SnapBoostingMachineClassifierImpl:
-    def __init__(
-        self,
-        num_round=100,
-        learning_rate=0.1,
-        random_state=0,
-        colsample_bytree=1.0,
-        subsample=1.0,
-        verbose=False,
-        lambda_l2=0.0,
-        early_stopping_rounds=10,
-        compress_trees=False,
-        base_score=None,
-        class_weight=None,
-        max_depth=None,
-        min_max_depth=1,
-        max_max_depth=5,
-        n_jobs=1,
-        use_histograms=True,
-        hist_nbins=256,
-        use_gpu=False,
-        gpu_id=0,
-        tree_select_probability=1.0,
-        regularizer=1.0,
-        fit_intercept=False,
-        gamma=1.0,
-        n_components=10,
-    ):
+    def __init__(self, **hyperparams):
         assert (
-            snapml_installed
+            snapml_version is not None
         ), """Your Python environment does not have snapml installed. Install using: pip install snapml"""
-        self._hyperparams = {
-            "num_round": num_round,
-            "learning_rate": learning_rate,
-            "random_state": random_state,
-            "colsample_bytree": colsample_bytree,
-            "subsample": subsample,
-            "verbose": verbose,
-            "lambda_l2": lambda_l2,
-            "early_stopping_rounds": early_stopping_rounds,
-            "compress_trees": compress_trees,
-            "base_score": base_score,
-            "class_weight": class_weight,
-            "max_depth": max_depth,
-            "min_max_depth": min_max_depth,
-            "max_max_depth": max_max_depth,
-            "n_jobs": n_jobs,
-            "use_histograms": use_histograms,
-            "hist_nbins": hist_nbins,
-            "use_gpu": use_gpu,
-            "gpu_id": gpu_id,
-            "tree_select_probability": tree_select_probability,
-            "regularizer": regularizer,
-            "fit_intercept": fit_intercept,
-            "gamma": gamma,
-            "n_components": n_components,
-        }
-        self._wrapped_model = snapml.SnapBoostingMachineClassifier(**self._hyperparams)
+
+        if (
+            snapml_version > version.Version("1.7.8")
+            and hyperparams.get("gpu_ids", None) is None
+        ):
+            hyperparams["gpu_ids"] = [0]
+
+        self._wrapped_model = snapml.SnapBoostingMachineClassifier(**hyperparams)
 
     def fit(self, X, y, **fit_params):
         X = lale.datasets.data_schemas.strip_schema(X)
@@ -103,6 +62,32 @@ _hyperparams_schema = {
         {
             "description": "This first sub-object lists all constructor arguments with their types, one at a time, omitting cross-argument constraints.",
             "type": "object",
+            "required": [
+                "num_round",
+                "learning_rate",
+                "random_state",
+                "colsample_bytree",
+                "subsample",
+                "verbose",
+                "lambda_l2",
+                "early_stopping_rounds",
+                "compress_trees",
+                "base_score",
+                "class_weight",
+                "max_depth",
+                "min_max_depth",
+                "max_max_depth",
+                "n_jobs",
+                "use_histograms",
+                "hist_nbins",
+                "use_gpu",
+                "gpu_id",
+                "tree_select_probability",
+                "regularizer",
+                "fit_intercept",
+                "gamma",
+                "n_components",
+            ],
             "relevantToOptimizer": [
                 "num_round",
                 "learning_rate",
@@ -438,5 +423,20 @@ _combined_schemas = {
 SnapBoostingMachineClassifier = lale.operators.make_operator(
     _SnapBoostingMachineClassifierImpl, _combined_schemas
 )
+
+if snapml_version is not None and snapml_version > version.Version("1.7.8"):  # type: ignore # noqa
+    SnapBoostingMachineClassifier = SnapBoostingMachineClassifier.customize_schema(
+        gpu_id=None,
+        gpu_ids={
+            "description": "Device IDs of the GPUs which will be used when GPU acceleration is enabled.",
+            "anyOf": [
+                {"type": "array", "items": {"type": "integer"}},
+                {"enum": [None], "description": "Use [0]."},
+            ],
+            "default": None,
+            "forOptimizer": False,
+        },
+        set_as_available=True,
+    )
 
 lale.docstrings.set_docstrings(SnapBoostingMachineClassifier)

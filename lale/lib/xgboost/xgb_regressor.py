@@ -1,4 +1,4 @@
-# Copyright 2019 IBM Corporation
+# Copyright 2019-2022 IBM Corporation
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -16,22 +16,28 @@ from typing import TYPE_CHECKING
 
 import numpy as np
 import pandas as pd
+from packaging import version
 
 import lale.docstrings
+import lale.helpers
 import lale.operators
+import lale.schemas
 
 from ._common_schemas import schema_silent
 
 try:
     import xgboost  # type: ignore
 
-    xgboost_installed = True
+    xgboost_version = version.parse(getattr(xgboost, "__version__"))
+
 except ImportError:
-    xgboost_installed = False
+    xgboost_version = None
     if TYPE_CHECKING:
         import xgboost  # type: ignore
 
 
+# xgboost does not like column names with some characters (which are legal in pandas)
+# so we encode them
 def _rename_one_feature(name):
     mapping = {"[": "&#91;", "]": "&#93;", "<": "&lt;"}
     for old, new in mapping.items():
@@ -53,29 +59,33 @@ class _XGBRegressorImpl:
 
     @classmethod
     def validate_hyperparams(cls, **hyperparams):
-        assert xgboost_installed, """Your Python environment does not have xgboost installed. You can install it with
+        assert (
+            xgboost_version is not None
+        ), """Your Python environment does not have xgboost installed. You can install it with
             pip install xgboost
         or with
             pip install 'lale[full]'"""
 
     def __init__(self, **hyperparams):
         self.validate_hyperparams(**hyperparams)
-        self._hyperparams = hyperparams
+        self._wrapped_model = xgboost.XGBRegressor(**hyperparams)
 
     def fit(self, X, y, **fit_params):
-        result = _XGBRegressorImpl(**self._hyperparams)
-        result._wrapped_model = xgboost.XGBRegressor(**self._hyperparams)
         renamed_X = _rename_all_features(X)
-        result._wrapped_model.fit(renamed_X, y, **fit_params)
-        return result
+        self._wrapped_model.fit(renamed_X, y, **fit_params)
+        return self
+
+    def partial_fit(self, X, y, **fit_params):
+        fit_params = lale.helpers.dict_without(fit_params, "classes")
+        if self._wrapped_model.__sklearn_is_fitted__():
+            booster = self._wrapped_model.get_booster()
+            fit_params = {**fit_params, "xgb_model": booster}
+        return self.fit(X, y, **fit_params)
 
     def predict(self, X, **predict_params):
         renamed_X = _rename_all_features(X)
         result = self._wrapped_model.predict(renamed_X, **predict_params)
         return result
-
-    def predict_proba(self, X):
-        return self._wrapped_model.predict_proba(X)
 
     def score(self, X, y):
         from sklearn.metrics import r2_score
@@ -301,7 +311,14 @@ Refer to https://xgboost.readthedocs.io/en/latest/parameter.html. """,
                     " If None, defaults to np.nan.",
                 },
                 "importance_type": {
-                    "enum": ["gain", "weight", "cover", "total_gain", "total_cover"],
+                    "enum": [
+                        "gain",
+                        "weight",
+                        "cover",
+                        "total_gain",
+                        "total_cover",
+                        None,
+                    ],
                     "default": "gain",
                     "description": "The feature importance type for the `feature_importances_` property.",
                 },
@@ -313,6 +330,7 @@ Refer to https://xgboost.readthedocs.io/en/latest/parameter.html. """,
         }
     ],
 }
+
 _input_fit_schema = {
     "description": "Fit gradient boosting classifier",
     "type": "object",
@@ -435,29 +453,11 @@ _input_predict_schema = {
         },
     },
 }
+
 _output_predict_schema = {
     "description": "Output data schema for predictions (target class labels).",
     "type": "array",
     "items": {"type": "number"},
-}
-
-_input_predict_proba_schema = {
-    "type": "object",
-    "required": ["X"],
-    "properties": {
-        "X": {
-            "type": "array",
-            "items": {
-                "type": "array",
-                "items": {"type": "number"},
-            },
-        }
-    },
-}
-
-_output_predict_probaschema = {
-    "type": "array",
-    "items": {"type": "array", "items": {"type": "number"}},
 }
 
 _combined_schemas = {
@@ -472,19 +472,17 @@ _combined_schemas = {
     "properties": {
         "hyperparams": _hyperparams_schema,
         "input_fit": _input_fit_schema,
+        "input_partial_fit": _input_fit_schema,
         "input_predict": _input_predict_schema,
         "output_predict": _output_predict_schema,
-        "input_predict_proba": _input_predict_schema,
-        "output_predict_proba": _output_predict_schema,
     },
 }
 
 XGBRegressor: lale.operators.PlannedIndividualOp
 XGBRegressor = lale.operators.make_operator(_XGBRegressorImpl, _combined_schemas)
 
-if xgboost_installed and xgboost.__version__ >= "0.90":
+if xgboost_version is not None and xgboost_version >= version.Version("0.90"):
     # page 58 of https://readthedocs.org/projects/xgboost/downloads/pdf/release_0.90/
-    import lale.schemas
 
     XGBRegressor = XGBRegressor.customize_schema(
         objective=lale.schemas.JSON(
@@ -508,7 +506,7 @@ if xgboost_installed and xgboost.__version__ >= "0.90":
         set_as_available=True,
     )
 
-if xgboost_installed and xgboost.__version__ >= "1.3":
+if xgboost_version is not None and xgboost_version >= version.Version("1.3"):
     # https://xgboost.readthedocs.io/en/latest/python/python_api.html#module-xgboost.sklearn
     XGBRegressor = XGBRegressor.customize_schema(
         monotone_constraints={
@@ -716,10 +714,10 @@ Refer to https://xgboost.readthedocs.io/en/latest/parameter.html. """,
                     "type": "number",
                 },
                 {
-                    "enum": [None, np.NaN],
+                    "enum": [None, np.nan],
                 },
             ],
-            "default": np.NaN,
+            "default": np.nan,
             "description": "Value in the data which needs to be present as a missing value. If"
             " If None, defaults to np.nan.",
         },
@@ -733,5 +731,176 @@ Refer to https://xgboost.readthedocs.io/en/latest/parameter.html. """,
         set_as_available=True,
     )
 
+if xgboost_version is not None and xgboost_version >= version.Version("1.5"):
+    # https://xgboost.readthedocs.io/en/latest/python/python_api.html#module-xgboost.sklearn
+    XGBRegressor = XGBRegressor.customize_schema(
+        enable_categorical={
+            "type": "boolean",
+            "description": """Experimental support for categorical data.
+Do not set to true unless you are interested in development.
+Only valid when gpu_hist and dataframe are used.""",
+            "default": False,
+        },
+        predictor={
+            "anyOf": [{"type": "string"}, {"enum": [None]}],
+            "description": """Force XGBoost to use specific predictor,
+available choices are [cpu_predictor, gpu_predictor].""",
+            "default": None,
+        },
+        set_as_available=True,
+    )
+
+if xgboost_version is not None and xgboost_version >= version.Version("1.6"):
+    # https://xgboost.readthedocs.io/en/latest/python/python_api.html#module-xgboost.sklearn
+    XGBRegressor = XGBRegressor.customize_schema(
+        max_leaves={
+            "description": """Maximum number of leaves; 0 indicates no limit.""",
+            "anyOf": [
+                {"type": "integer"},
+                {"enum": [None], "forOptimizer": False},
+            ],
+            "default": None,
+        },
+        max_bin={
+            "description": """If using histogram-based algorithm, maximum number of bins per feature.""",
+            "anyOf": [
+                {"type": "integer"},
+                {"enum": [None], "forOptimizer": False},
+            ],
+            "default": None,
+        },
+        grow_policy={
+            "description": """Tree growing policy.
+            0 or depthwise: favor splitting at nodes closest to the node, i.e. grow depth-wise.
+            1 or lossguide: favor splitting at nodes with highest loss change.""",
+            "enum": [0, 1, "depthwise", "lossguide", None],
+            "default": None,
+        },
+        sampling_method={
+            "description": """Sampling method. Used only by gpu_hist tree method.
+            - uniform: select random training instances uniformly.
+            - gradient_based select random training instances with higher probability when the gradient and hessian are larger. (cf. CatBoost)""",
+            "enum": ["uniform", "gadient_based", None],
+            "default": None,
+        },
+        max_cat_to_onehot={
+            "description": """A threshold for deciding whether XGBoost should use
+            one-hot encoding based split for categorical data.""",
+            "anyOf": [
+                {"type": "integer"},
+                {"enum": [None]},
+            ],
+            "default": None,
+        },
+        eval_metric={
+            "description": """Metric used for monitoring the training result and early stopping.""",
+            "anyOf": [
+                {"type": "string"},
+                {"type": "array", "items": {"type": "string"}},
+                {"type": "array", "items": {"laleType": "callable"}},
+                {"enum": [None]},
+            ],
+            "default": None,
+        },
+        early_stopping_rounds={
+            "description": """Activates early stopping.
+            Validation metric needs to improve at least once in every early_stopping_rounds round(s)
+            to continue training.""",
+            "anyOf": [
+                {"type": "integer"},
+                {"enum": [None]},
+            ],
+            "default": None,
+        },
+        callbacks={
+            "description": """List of callback functions that are applied at end of each iteration.
+            It is possible to use predefined callbacks by using Callback API.""",
+            "anyOf": [
+                {"type": "array", "items": {"laleType": "callable"}},
+                {"enum": [None]},
+            ],
+            "default": None,
+        },
+        n_jobs={
+            "anyOf": [{"type": "integer"}, {"enum": [None]}],
+            "description": "Number of parallel threads used to run xgboost.  (replaces ``nthread``)",
+            "default": 1,
+        },
+        random_state={
+            "anyOf": [{"type": "integer"}, {"enum": [None]}],
+            "description": "Random number seed.  (replaces seed)",
+            "default": 0,
+        },
+    )
+
+if xgboost_version is not None and xgboost_version >= version.Version("1.7"):
+    # https://xgboost.readthedocs.io/en/latest/python/python_api.html#module-xgboost.sklearn
+    XGBRegressor = XGBRegressor.customize_schema(
+        feature_types={
+            "description": "Used for specifying feature types without constructing a dataframe. See DMatrix for details.",
+            "laleType": "Any",
+        },
+        max_cat_threshold={
+            "description": """Maximum number of categories considered for each split.
+            Used only by partition-based splits for preventing over-fitting.
+            Also, enable_categorical needs to be set to have categorical feature support.
+            See Categorical Data and Parameters for Categorical Feature for details.""",
+            "anyOf": [
+                {
+                    "type": "integer",
+                    "minimum": 0,
+                    "distribution": "uniform",
+                    "minimumForOptimizer": 1,
+                    "maximumForOptimizer": 10,
+                },
+                {"enum": [None]},
+            ],
+            "default": None,
+        },
+        set_as_available=True,
+    )
+
+if xgboost_version is not None and xgboost_version >= version.Version("2.0"):
+    # https://xgboost.readthedocs.io/en/latest/python/python_api.html#module-xgboost.sklearn
+    XGBRegressor = XGBRegressor.customize_schema(
+        n_estimators={
+            "description": "Number of trees to fit.",
+            "anyOf": [
+                {
+                    "type": "integer",
+                    "default": 200,
+                    "minimumForOptimizer": 50,
+                    "maximumForOptimizer": 1000,
+                },
+                {"enum": [None]},
+            ],
+        },
+        device={
+            "description": """Device ordinal""",
+            "anyOf": [
+                {"enum": ["cpu", "cuda", "gpu"]},
+                {"enum": [None]},
+            ],
+            "default": None,
+        },
+        multi_strategy={
+            "description": """The strategy used for training multi-target models,
+             including multi-target regression and multi-class classification.
+             See Multiple Outputs for more information.""",
+            "anyOf": [
+                {
+                    "description": "One model for each target.",
+                    "enum": ["one_output_per_tree"],
+                },
+                {
+                    "description": "Use multi-target trees.",
+                    "enum": ["multi_output_tree"],
+                },
+                {"enum": [None]},
+            ],
+            "default": None,
+        },
+        set_as_available=True,
+    )
 
 lale.docstrings.set_docstrings(XGBRegressor)

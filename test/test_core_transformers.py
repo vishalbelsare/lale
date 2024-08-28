@@ -17,10 +17,15 @@ from test import EnableSchemaValidation
 from typing import Any
 
 import jsonschema
+import pandas as pd
+from packaging import version
 
 import lale.lib.lale
 import lale.lib.sklearn
 import lale.type_checking
+from lale.datasets import pandas2spark
+from lale.datasets.data_schemas import add_table_name, get_table_name
+from lale.datasets.util import spark_installed
 from lale.lib.lale import ConcatFeatures
 from lale.lib.sklearn import (
     NMF,
@@ -30,8 +35,10 @@ from lale.lib.sklearn import (
     LogisticRegression,
     MissingIndicator,
     Nystroem,
-    TfidfVectorizer,
 )
+from lale.lib.sklearn import TargetEncoder as SkTargetEncoder
+from lale.lib.sklearn import TfidfVectorizer
+from lale.operators import sklearn_version
 
 
 class TestFeaturePreprocessing(unittest.TestCase):
@@ -81,7 +88,6 @@ def create_function_test_feature_preprocessor(fproc_name):
 
         # test_in_a_pipeline
         # This test assumes that the output of feature processing is compatible with LogisticRegression
-        from lale.lib.sklearn import LogisticRegression
 
         pipeline = fproc >> LogisticRegression()
         trained = pipeline.fit(self.X_train, self.y_train)
@@ -94,7 +100,7 @@ def create_function_test_feature_preprocessor(fproc_name):
         trained = hyperopt.fit(self.X_train, self.y_train)
         _ = trained.predict(self.X_test)
 
-    test_feature_preprocessor.__name__ = "test_{0}".format(fproc_name.split(".")[-1])
+    test_feature_preprocessor.__name__ = f"test_{fproc_name.split('.')[-1]}"
     return test_feature_preprocessor
 
 
@@ -113,22 +119,22 @@ feature_preprocessors = [
     "lale.lib.sklearn.VarianceThreshold",
     "lale.lib.sklearn.Isomap",
 ]
-for fproc in feature_preprocessors:
+for fproc_to_test in feature_preprocessors:
     setattr(
         TestFeaturePreprocessing,
-        "test_{0}".format(fproc.split(".")[-1]),
-        create_function_test_feature_preprocessor(fproc),
+        f"test_{fproc_to_test.rsplit('.', maxsplit=1)[-1]}",
+        create_function_test_feature_preprocessor(fproc_to_test),
     )
 
 
 class TestNMF(unittest.TestCase):
     def test_init_fit_predict(self):
-        import lale.datasets
+        from lale.datasets import digits_df
 
         nmf = NMF()
         lr = LogisticRegression()
         trainable = nmf >> lr
-        (train_X, train_y), (test_X, test_y) = lale.datasets.digits_df()
+        (train_X, train_y), (test_X, _test_y) = digits_df()
         trained = trainable.fit(train_X, train_y)
         _ = trained.predict(test_X)
 
@@ -142,12 +148,12 @@ class TestFunctionTransformer(unittest.TestCase):
     def test_init_fit_predict(self):
         import numpy as np
 
-        import lale.datasets
+        from lale.datasets import digits_df
 
         ft = FunctionTransformer(func=np.log1p)
         lr = LogisticRegression()
         trainable = ft >> lr
-        (train_X, train_y), (test_X, test_y) = lale.datasets.digits_df()
+        (train_X, train_y), (test_X, _test_y) = digits_df()
         trained = trainable.fit(train_X, train_y)
         _ = trained.predict(test_X)
 
@@ -206,8 +212,6 @@ class TestRFE(unittest.TestCase):
         import sklearn.datasets
         import sklearn.svm
 
-        from lale.lib.sklearn import RFE, LogisticRegression
-
         svm = sklearn.svm.SVR(kernel="linear")
         rfe = RFE(estimator=svm, n_features_to_select=2)
         lr = LogisticRegression()
@@ -223,8 +227,6 @@ class TestRFE(unittest.TestCase):
 
     def test_attrib(self):
         import sklearn.datasets
-
-        from lale.lib.sklearn import RFE, LogisticRegression
 
         svm = lale.lib.sklearn.SVR(kernel="linear")
         rfe = RFE(estimator=svm, n_features_to_select=2)
@@ -253,7 +255,6 @@ class TestOrdinalEncoder(unittest.TestCase):
         from lale.lib.sklearn import OrdinalEncoder
 
         fproc = OrdinalEncoder(handle_unknown="ignore")
-        from lale.lib.sklearn import LogisticRegression
 
         pipeline = fproc >> LogisticRegression()
 
@@ -304,6 +305,23 @@ class TestOrdinalEncoder(unittest.TestCase):
         _ = trained_oe._impl.inverse_transform(transformed_X)
 
 
+class TestTargetEncoder(unittest.TestCase):
+    def test_sklearn_target_encoder(self):
+        import numpy as np
+
+        X = np.array([["dog"] * 20 + ["cat"] * 30 + ["snake"] * 38], dtype=object).T
+        y = [90.3] * 5 + [80.1] * 15 + [20.4] * 5 + [20.1] * 25 + [21.2] * 8 + [49] * 30
+
+        if sklearn_version < version.Version("1.3"):
+            with self.assertRaises(NotImplementedError):
+                enc_auto = SkTargetEncoder(smooth="auto")
+                _ = enc_auto.fit_transform(X, y)
+        else:
+            # example from the TargetEncoder documentation
+            enc_auto = SkTargetEncoder(smooth="auto")
+            _ = enc_auto.fit_transform(X, y)
+
+
 class TestConcatFeatures(unittest.TestCase):
     def test_hyperparam_defaults(self):
         _ = ConcatFeatures()
@@ -316,11 +334,117 @@ class TestConcatFeatures(unittest.TestCase):
         trained_cf = trainable_cf.fit(X=[A, B])
         transformed: Any = trained_cf.transform([A, B])
         expected = [[11, 12, 13, 14, 15], [21, 22, 23, 24, 25], [31, 32, 33, 34, 35]]
-        for i_sample in range(len(transformed)):
-            for i_feature in range(len(transformed[i_sample])):
-                self.assertEqual(
-                    transformed[i_sample][i_feature], expected[i_sample][i_feature]
-                )
+        for transformed_sample, expected_sample in zip(transformed, expected):
+            for transformed_feature, expected_feature in zip(
+                transformed_sample, expected_sample
+            ):
+                self.assertEqual(transformed_feature, expected_feature)
+
+    def test_init_fit_predict_pandas(self):
+        trainable_cf = ConcatFeatures()
+        A = [[11, 12, 13], [21, 22, 23], [31, 32, 33]]
+        B = [[14, 15], [24, 25], [34, 35]]
+        A = pd.DataFrame(A, columns=["a", "b", "c"]).rename_axis(index="idx")
+        B = pd.DataFrame(B, columns=["d", "e"]).rename_axis(index="idx")
+        A = add_table_name(A, "A")
+        B = add_table_name(B, "B")
+        trained_cf = trainable_cf.fit(X=[A, B])
+        transformed = trained_cf.transform([A, B])
+        self.assertEqual(transformed.index.name, "idx")
+        expected = [
+            [11, 12, 13, 14, 15],
+            [21, 22, 23, 24, 25],
+            [31, 32, 33, 34, 35],
+        ]
+        expected = pd.DataFrame(expected, columns=["a", "b", "c", "d", "e"])
+        for c in expected.columns:
+            self.assertEqual(list(transformed[c]), list(expected[c]))
+
+    def test_init_fit_predict_pandas_series(self):
+        trainable_cf = ConcatFeatures()
+        A = [[11, 12, 13], [21, 22, 23], [31, 32, 33]]
+        B = [14, 24, 34]
+        A = pd.DataFrame(A, columns=["a", "b", "c"])
+        B = pd.Series(B, name="d")
+        A = add_table_name(A, "A")
+        B = add_table_name(B, "B")
+        trained_cf = trainable_cf.fit(X=[A, B])
+        transformed = trained_cf.transform([A, B])
+        expected = [
+            [11, 12, 13, 14],
+            [21, 22, 23, 24],
+            [31, 32, 33, 34],
+        ]
+        expected = pd.DataFrame(expected, columns=["a", "b", "c", "d"])
+        for c in expected.columns:
+            self.assertEqual(list(transformed[c]), list(expected[c]))
+
+    def test_init_fit_predict_spark(self):
+        if spark_installed:
+            trainable_cf = ConcatFeatures()
+            A = [[11, 12, 13], [21, 22, 23], [31, 32, 33]]
+            B = [[14, 15], [24, 25], [34, 35]]
+            A = pd.DataFrame(A, columns=["a", "b", "c"])
+            B = pd.DataFrame(B, columns=["d", "e"])
+            A = pandas2spark(A.rename_axis(index="idx"))
+            B = pandas2spark(B.rename_axis(index="idx"))
+            A = add_table_name(A, "A")
+            B = add_table_name(B, "B")
+
+            trained_cf = trainable_cf.fit(X=[A, B])
+            transformed = trained_cf.transform([A, B]).toPandas()
+            self.assertEqual(transformed.index.name, "idx")
+            expected = [
+                [11, 12, 13, 14, 15],
+                [21, 22, 23, 24, 25],
+                [31, 32, 33, 34, 35],
+            ]
+            expected = pd.DataFrame(expected, columns=["a", "b", "c", "d", "e"])
+            for c in expected.columns:
+                self.assertEqual(list(transformed[c]), list(expected[c]))
+
+    def test_init_fit_predict_spark_pandas(self):
+        if spark_installed:
+            trainable_cf = ConcatFeatures()
+            A = [[11, 12, 13], [21, 22, 23], [31, 32, 33]]
+            B = [[14, 15], [24, 25], [34, 35]]
+            A = pd.DataFrame(A, columns=["a", "b", "c"])
+            B = pd.DataFrame(B, columns=["d", "e"])
+            A = pandas2spark(A)
+            A = add_table_name(A, "A")
+            B = add_table_name(B, "B")
+
+            trained_cf = trainable_cf.fit(X=[A, B])
+            transformed = trained_cf.transform([A, B])
+            expected = [
+                [11, 12, 13, 14, 15],
+                [21, 22, 23, 24, 25],
+                [31, 32, 33, 34, 35],
+            ]
+            expected = pd.DataFrame(expected, columns=["a", "b", "c", "d", "e"])
+            for c in expected.columns:
+                self.assertEqual(list(transformed[c]), list(expected[c]))
+
+    def test_init_fit_predict_spark_no_table_name(self):
+        if spark_installed:
+            trainable_cf = ConcatFeatures()
+            A = [[11, 12, 13], [21, 22, 23], [31, 32, 33]]
+            B = [[14, 15], [24, 25], [34, 35]]
+            A = pd.DataFrame(A, columns=["a", "b", "c"])
+            B = pd.DataFrame(B, columns=["d", "e"])
+            A = pandas2spark(A)
+            B = pandas2spark(B)
+
+            trained_cf = trainable_cf.fit(X=[A, B])
+            transformed = trained_cf.transform([A, B]).toPandas()
+            expected = [
+                [11, 12, 13, 14, 15],
+                [21, 22, 23, 24, 25],
+                [31, 32, 33, 34, 35],
+            ]
+            expected = pd.DataFrame(expected, columns=["a", "b", "c", "d", "e"])
+            for c in expected.columns:
+                self.assertEqual(list(transformed[c]), list(expected[c]))
 
     def test_comparison_with_scikit(self):
         import warnings
@@ -329,24 +453,23 @@ class TestConcatFeatures(unittest.TestCase):
         import sklearn.datasets
         import sklearn.utils
 
-        from lale.helpers import cross_val_score
-        from lale.lib.sklearn import PCA
+        from lale.helpers import cross_val_score as lale_cross_val_score
 
         pca = PCA(n_components=3, random_state=42, svd_solver="arpack")
         nys = Nystroem(n_components=10, random_state=42)
         concat = ConcatFeatures()
-        lr = LogisticRegression(random_state=42, C=0.1)
+        lr = LogisticRegression(random_state=42, C=0.1, solver="saga")
         trainable = (pca & nys) >> concat >> lr
         digits = sklearn.datasets.load_digits()
         X, y = sklearn.utils.shuffle(digits.data, digits.target, random_state=42)
 
-        cv_results = cross_val_score(trainable, X, y)
-        cv_results = ["{0:.1%}".format(score) for score in cv_results]
+        cv_results = lale_cross_val_score(trainable, X, y)
+        cv_results = [f"{score:.1%}" for score in cv_results]
 
         from sklearn.decomposition import PCA as SklearnPCA
         from sklearn.kernel_approximation import Nystroem as SklearnNystroem
         from sklearn.linear_model import LogisticRegression as SklearnLR
-        from sklearn.model_selection import cross_val_score
+        from sklearn.model_selection import cross_val_score as sklearn_cross_val_score
         from sklearn.pipeline import FeatureUnion, make_pipeline
 
         union = FeatureUnion(
@@ -358,11 +481,11 @@ class TestConcatFeatures(unittest.TestCase):
                 ("nys", SklearnNystroem(n_components=10, random_state=42)),
             ]
         )
-        lr = SklearnLR(random_state=42, C=0.1)
+        lr = SklearnLR(random_state=42, C=0.1, solver="saga")
         pipeline = make_pipeline(union, lr)
 
-        scikit_cv_results = cross_val_score(pipeline, X, y, cv=5)
-        scikit_cv_results = ["{0:.1%}".format(score) for score in scikit_cv_results]
+        scikit_cv_results = sklearn_cross_val_score(pipeline, X, y, cv=5)
+        scikit_cv_results = [f"{score:.1%}" for score in scikit_cv_results]
         self.assertEqual(cv_results, scikit_cv_results)
         warnings.resetwarnings()
 
@@ -378,7 +501,7 @@ class TestConcatFeatures(unittest.TestCase):
         lr = LogisticRegression(random_state=42, C=0.1)
         trainable = (pca & nys) >> concat >> lr
 
-        (X_train, y_train), (X_test, y_test) = load_iris_df()
+        (X_train, y_train), (X_test, _y_test) = load_iris_df()
         trained = trainable.fit(X_train, y_train)
         _ = trained.predict(X_test)
 
@@ -413,6 +536,23 @@ class TestConcatFeatures(unittest.TestCase):
         iris_data = load_iris()
         clf.fit(iris_data.data, iris_data.target)
         clf.predict(iris_data.data)
+
+    def test_name(self):
+        trainable_cf = ConcatFeatures()
+        A = [[11, 12, 13], [21, 22, 23], [31, 32, 33]]
+        B = [[14, 15], [24, 25], [34, 35]]
+        A = pd.DataFrame(A, columns=["a", "b", "c"])
+        B = pd.DataFrame(B, columns=["d", "e"])
+        A = add_table_name(A, "A")
+        B = add_table_name(B, "B")
+        trained_cf = trainable_cf.fit(X=[A, B])
+        transformed = trained_cf.transform([A, B])
+        self.assertEqual(get_table_name(transformed), None)
+        A = add_table_name(A, "AB")
+        B = add_table_name(B, "AB")
+        trained_cf = trainable_cf.fit(X=[A, B])
+        transformed = trained_cf.transform([A, B])
+        self.assertEqual(get_table_name(transformed), "AB")
 
 
 class TestTfidfVectorizer(unittest.TestCase):

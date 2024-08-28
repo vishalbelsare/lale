@@ -1,4 +1,4 @@
-# Copyright 2019, 2020, 2021 IBM Corporation
+# Copyright 2019-2023 IBM Corporation
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -11,9 +11,9 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import typing
 
 import aif360.algorithms.preprocessing
-import aif360.datasets
 import numpy as np
 import pandas as pd
 
@@ -57,7 +57,7 @@ class _DisparateImpactRemoverImpl:
 
     def _prep_and_encode(self, X, y=None):
         prepared_X = self.redact_and_prep.transform(X, y)
-        encoded_X, encoded_y = self.prot_attr_enc.transform(X, y)
+        encoded_X, _encoded_y = self.prot_attr_enc.transform_X_y(X, y)
         assert isinstance(encoded_X, pd.DataFrame), type(encoded_X)
         assert encoded_X.shape[1] == 1, encoded_X.columns
         if isinstance(prepared_X, pd.DataFrame):
@@ -94,21 +94,31 @@ class _DisparateImpactRemoverImpl:
         assert isinstance(trainable_redact_and_prep, lale.operators.TrainablePipeline)
         self.redact_and_prep = trainable_redact_and_prep.fit(X, y)
         self.prot_attr_enc = ProtectedAttributesEncoder(
-            **fairness_info, remainder="drop", return_X_y=True, combine="and"
+            **fairness_info, remainder="drop", combine="and"
         )
         encoded_X, sensitive_attribute = self._prep_and_encode(X, y)
         if isinstance(sensitive_attribute, str):
             assert isinstance(encoded_X, pd.DataFrame)
-            features = encoded_X.to_numpy().tolist()
-            index = encoded_X.columns.to_list().index(sensitive_attribute)
+
+            enc = typing.cast(
+                pd.DataFrame, encoded_X
+            )  # not sure why this cast is needed
+            features = enc.to_numpy().tolist()
+            index = enc.columns.to_list().index(sensitive_attribute)
         else:
             assert isinstance(encoded_X, np.ndarray)
             features = encoded_X.tolist()
             index = sensitive_attribute
+        # workaround for "Matplotlib is currently using agg, which is a non-GUI backend"
+        import matplotlib
+
+        old_matplotlib_use_function = matplotlib.use
+        matplotlib.use = lambda _: None
         # since DisparateImpactRemover does not have separate fit and transform
         di_remover = aif360.algorithms.preprocessing.DisparateImpactRemover(
             repair_level=self.repair_level, sensitive_attribute=sensitive_attribute
         )
+        matplotlib.use = old_matplotlib_use_function
         self.mitigator = di_remover.Repairer(features, index, self.repair_level, False)
         return self
 
@@ -116,8 +126,12 @@ class _DisparateImpactRemoverImpl:
         encoded_X, _ = self._prep_and_encode(X)
         columns = None
         if isinstance(encoded_X, pd.DataFrame):
-            features = encoded_X.to_numpy().tolist()
-            columns = encoded_X.columns
+            enc = typing.cast(
+                pd.DataFrame, encoded_X
+            )  # not sure why this cast is needed
+
+            features = enc.to_numpy().tolist()
+            columns = enc.columns
         else:
             assert isinstance(encoded_X, np.ndarray)
             features = encoded_X.tolist()

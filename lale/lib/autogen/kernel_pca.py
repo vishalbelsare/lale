@@ -1,8 +1,9 @@
 from numpy import inf, nan
+from packaging import version
 from sklearn.decomposition import KernelPCA as Op
 
 from lale.docstrings import set_docstrings
-from lale.operators import make_operator
+from lale.operators import make_operator, sklearn_version
 
 
 class _KernelPCAImpl:
@@ -138,7 +139,6 @@ _hyperparams_schema = {
                     "type": "number",
                     "minimumForOptimizer": 1e-08,
                     "maximumForOptimizer": 0.01,
-                    "distribution": "loguniform",
                     "default": 0,
                     "description": "Convergence tolerance for arpack",
                 },
@@ -180,7 +180,20 @@ _hyperparams_schema = {
                     "description": "The number of parallel jobs to run",
                 },
             },
-        }
+        },
+        {
+            "description": "Cannot fit_inverse_transform with a precomputed kernel.",
+            "anyOf": [
+                {
+                    "type": "object",
+                    "properties": {"fit_inverse_transform": {"enum": [False]}},
+                },
+                {
+                    "type": "object",
+                    "properties": {"kernel": {"not": {"enum": ["precomputed"]}}},
+                },
+            ],
+        },
     ],
 }
 _input_fit_schema = {
@@ -226,5 +239,24 @@ _combined_schemas = {
     },
 }
 KernelPCA = make_operator(_KernelPCAImpl, _combined_schemas)
+
+if sklearn_version >= version.Version("1.4"):
+
+    KernelPCA = KernelPCA.customize_schema(
+        degree={
+            "anyOf": [
+                {
+                    "type": "integer",
+                    "minimumForOptimizer": 2,
+                    "maximumForOptimizer": 3,
+                    "distribution": "uniform",
+                },
+                {"type": "number", "forOptimizer": False},
+            ],
+            "default": 3,
+            "description": "Degree for poly kernels",
+        },
+        set_as_available=True,
+    )
 
 set_docstrings(KernelPCA)

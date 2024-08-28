@@ -37,16 +37,15 @@ class NonTerminal(Operator):
                 raise ValueError(
                     f"NonTerminal._with_params called with unknown parameters: {unknowns}"
                 )
-            else:
-                assert "name" in impl_params
-                return NonTerminal(impl_params["name"])
+            assert "name" in impl_params
+            return NonTerminal(impl_params["name"])
         else:
             return self
 
     def __init__(self, name):
         self._name = name
 
-    def _has_same_impl(self):
+    def _has_same_impl(self, other: Operator):
         pass
 
     def is_supervised(self):
@@ -92,7 +91,9 @@ class Grammar(Operator):
         # from this point of view, Grammar is just a higher order operator
         raise NotImplementedError("setting Grammar parameters is not yet supported")
 
-    def __init__(self, variables: Dict[str, Operator] = {}):
+    def __init__(self, variables: Optional[Dict[str, Operator]] = None):
+        if variables is None:
+            variables = {}
         self._variables = variables
 
     def __getattr__(self, name):
@@ -108,7 +109,7 @@ class Grammar(Operator):
         else:
             self._variables[name] = value
 
-    def _has_same_impl(self):
+    def _has_same_impl(self, other: Operator):
         pass
 
     def is_supervised(self):
@@ -141,9 +142,9 @@ class Grammar(Operator):
         Optional[Operator]
         """
         if isinstance(op, BasePipeline):
-            steps = op.steps()
+            steps = op.steps_list()
             new_maybe_steps: List[Optional[Operator]] = [
-                self._unfold(sop, n) for sop in op.steps()
+                self._unfold(sop, n) for sop in op.steps_list()
             ]
             if None not in new_maybe_steps:
                 new_steps: List[Operator] = cast(List[Operator], new_maybe_steps)
@@ -153,7 +154,7 @@ class Grammar(Operator):
             else:
                 return None
         if isinstance(op, OperatorChoice):
-            steps = [s for s in (self._unfold(sop, n) for sop in op.steps()) if s]
+            steps = [s for s in (self._unfold(sop, n) for sop in op.steps_list()) if s]
             return make_choice(*steps) if steps else None
         if isinstance(op, NonTerminal):
             return self._unfold(self._variables[op.name()], n - 1) if n > 0 else None
@@ -163,12 +164,10 @@ class Grammar(Operator):
 
     def unfold(self, n: int) -> PlannedOperator:
         """
-        Explore the grammar `g` starting from `g.start` and generate all possible   choices after `n` derivations.
+        Explore this grammar `self.start` and generate all possible   choices after `n` derivations.
 
         Parameters
         ----------
-        g : Grammar
-            input grammar
         n : int
             number of derivations
 
@@ -196,9 +195,9 @@ class Grammar(Operator):
         Optional[Operator]
         """
         if isinstance(op, BasePipeline):
-            steps = op.steps()
+            steps = op.steps_list()
             new_maybe_steps: List[Optional[Operator]] = [
-                self._sample(sop, n) for sop in op.steps()
+                self._sample(sop, n) for sop in op.steps_list()
             ]
             if None not in new_maybe_steps:
                 new_steps: List[Operator] = cast(List[Operator], new_maybe_steps)
@@ -208,7 +207,8 @@ class Grammar(Operator):
             else:
                 return None
         if isinstance(op, OperatorChoice):
-            return self._sample(random.choice(op.steps()), n)
+            # This choice does not need to be cryptographically secure or hard to predict
+            return self._sample(random.choice(op.steps_list()), n)  # nosec
         if isinstance(op, NonTerminal):
             return self._sample(getattr(self, op.name()), n - 1) if n > 0 else None
         if isinstance(op, IndividualOp):

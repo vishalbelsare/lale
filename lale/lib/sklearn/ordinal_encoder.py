@@ -19,10 +19,11 @@ import numpy as np
 import pandas as pd
 import sklearn
 import sklearn.preprocessing
+from packaging import version
 
 import lale.docstrings
 import lale.operators
-from lale.schemas import AnyOf, Enum, Int, Null
+from lale.schemas import AnyOf, Enum, Float, Int, Null
 
 
 class _OrdinalEncoderImpl:
@@ -31,7 +32,7 @@ class _OrdinalEncoderImpl:
             "categories": hyperparams["categories"],
             "dtype": hyperparams["dtype"],
         }
-        if sklearn.__version__ >= "0.24.1":
+        if lale.operators.sklearn_version >= version.Version("0.24.1"):
             if hyperparams["handle_unknown"] != "ignore":
                 base_hyperparams["handle_unknown"] = hyperparams["handle_unknown"]
                 base_hyperparams["unknown_value"] = hyperparams["unknown_value"]
@@ -54,7 +55,7 @@ class _OrdinalEncoderImpl:
         self._wrapped_model.fit(X, y)
         if self.handle_unknown == "ignore":
             n_features = len(self._wrapped_model.categories_)
-            for i in range(n_features):
+            for _i in range(n_features):
                 self.unknown_categories_mapping.append({})
         return self
 
@@ -85,9 +86,9 @@ class _OrdinalEncoderImpl:
                             transformed_X[:, i][~X_mask[:, i]] = len(
                                 self._wrapped_model.categories_[i]
                             )
-                            dict_categories[
-                                len(self._wrapped_model.categories_[i])
-                            ] = None
+                            dict_categories[len(self._wrapped_model.categories_[i])] = (
+                                None
+                            )
                         else:
                             transformed_X[:, i][
                                 ~X_mask[:, i]
@@ -107,7 +108,9 @@ class _OrdinalEncoderImpl:
         else:
             try:
                 X_tr = self._wrapped_model.inverse_transform(X)
-            except IndexError:  # which means the original inverse transform failed during the last step
+            except (
+                IndexError
+            ):  # which means the original inverse transform failed during the last step
                 n_samples, _ = X.shape
                 n_features = len(self._wrapped_model.categories_)
                 # dtype=object in order to insert None values
@@ -121,65 +124,6 @@ class _OrdinalEncoderImpl:
                         except IndexError:
                             X_tr[j, i] = self.unknown_categories_mapping[i][label]
             return X_tr
-
-    # _hyperparams_schema = {
-    #     "description": "Hyperparameter schema for the OrdinalEncoder model from scikit-learn.",
-    #     "allOf": [
-    #         {
-    #             "type": "object",
-    #             "additionalProperties": False,
-    #             "required": ["categories", "dtype"],
-    #             "relevantToOptimizer": [],
-    #             "properties": {
-    #                 "categories": {
-    #                     "anyOf": [
-    #                         {
-    #                             "description": "Determine categories automatically from training data.",
-    #                             "enum": ["auto", None],
-    #                         },
-    #                         {
-    #                             "description": "The ith list element holds the categories expected in the ith column.",
-    #                             "type": "array",
-    #                             "items": {
-    #                                 "anyOf": [
-    #                                     {
-    #                                         "type": "array",
-    #                                         "items": {"type": "string"},
-    #                                     },
-    #                                     {
-    #                                         "type": "array",
-    #                                         "items": {"type": "number"},
-    #                                         "description": "Should be sorted.",
-    #                                     },
-    #                                 ]
-    #                             },
-    #                         },
-    #                     ],
-    #                     "default": "auto",
-    #                 },
-    #                 "dtype": {
-    #                     "description": "Desired dtype of output, must be number. See https://docs.scipy.org/doc/numpy-1.14.0/reference/arrays.scalars.html#arrays-scalars-built-in",
-    #                     "laleType": "Any",
-    #                     "default": "float64",
-    #                 },
-    #                 "handle_unknown": {
-    #                     "description": """When set to ‘error’ an error will be raised in case an unknown categorical feature is present during transform.
-    # When set to ‘use_encoded_value’, the encoded value of unknown categories will be set to the value given for the parameter unknown_value.
-    # In inverse_transform, an unknown category will be denoted as None.""",
-    #                     "enum": ["error", "use_encoded_value"],
-    #                     "default": "error",
-    #                 },
-    #                 "unknown_value": {
-    #                     "description": """When the parameter handle_unknown is set to ‘use_encoded_value’, this parameter is required and will set the encoded value of unknown categories.
-    # It has to be distinct from the values used to encode any of the categories in fit.
-    # """,
-    #                     "anyOf": [{"type": "integer"}, {"enum": [None, np.nan]}],
-    #                     "default": None,
-    #                 },
-    #             },
-    #         }
-    #     ],
-    # }
 
 
 _hyperparams_schema = {
@@ -243,7 +187,6 @@ n is the maximum encoding value based on known categories.""",
 }
 
 _input_fit_schema = {
-    "description": "Input data schema for training the OrdinalEncoder model from scikit-learn.",
     "type": "object",
     "required": ["X"],
     "additionalProperties": False,
@@ -263,7 +206,6 @@ _input_fit_schema = {
 }
 
 _input_transform_schema = {
-    "description": "Input data schema for predictions using the OrdinalEncoder model from scikit-learn.",
     "type": "object",
     "required": ["X"],
     "additionalProperties": False,
@@ -282,7 +224,7 @@ _input_transform_schema = {
 }
 
 _output_transform_schema = {
-    "description": "Output data schema for predictions (projected data) using the OrdinalEncoder model from scikit-learn.",
+    "description": "Ordinal codes.",
     "type": "array",
     "items": {"type": "array", "items": {"type": "number"}},
 }
@@ -307,7 +249,7 @@ _combined_schemas = {
 
 OrdinalEncoder = lale.operators.make_operator(_OrdinalEncoderImpl, _combined_schemas)
 
-if sklearn.__version__ >= "0.24.1":
+if lale.operators.sklearn_version >= version.Version("0.24.1"):
     OrdinalEncoder = typing.cast(
         lale.operators.PlannedIndividualOp,
         OrdinalEncoder.customize_schema(
@@ -364,6 +306,45 @@ It has to be distinct from the values used to encode any of the categories in fi
                 {"type": "object", "properties": {"unknown_value": {"enum": [None]}}},
             ],
         },
+        set_as_available=True,
+    )
+
+if lale.operators.sklearn_version >= version.Version("1.1"):
+    OrdinalEncoder = OrdinalEncoder.customize_schema(
+        encoded_missing_value=AnyOf(
+            desc="Encoded value of missing categories. If set to ``np.nan``, then the ``dtype`` parameter must be a float dtype.",
+            default=np.nan,
+            types=[Int(), Enum(values=[np.nan]), Null()],
+        ),
+        set_as_available=True,
+    )
+
+if lale.operators.sklearn_version >= version.Version("1.3"):
+    OrdinalEncoder = OrdinalEncoder.customize_schema(
+        max_categories=AnyOf(
+            desc="""Specifies an upper limit to the number of output categories for each input feature when considering infrequent categories. If there are infrequent categories, max_categories includes the category representing the infrequent categories along with the frequent categories. If None, there is no limit to the number of output features.
+
+max_categories do not take into account missing or unknown categories. Setting unknown_value or encoded_missing_value to an integer will increase the number of unique integer codes by one each. This can result in up to max_categories + 2 integer codes.
+""",
+            default=None,
+            types=[Int(minimum=1, exclusiveMinimum=True), Null()],
+        ),
+        min_frequency=AnyOf(
+            desc="Specifies the minimum frequency below which a category will be considered infrequent.",
+            default=None,
+            types=[
+                Int(
+                    desc="Categories with a smaller cardinality will be considered infrequent.",
+                    minimum=1,
+                ),
+                Float(
+                    desc="Categories with a smaller cardinality than min_frequency * n_samples will be considered infrequent.",
+                    minimum=0.0,
+                    maximum=1.0,
+                ),
+                Null(),
+            ],
+        ),
         set_as_available=True,
     )
 

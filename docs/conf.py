@@ -33,22 +33,30 @@
 import builtins
 import os
 import sys
-from typing import Dict
+from typing import Dict, List
+
+import lale
+from lale.settings import set_disable_hyperparams_schema_validation
 
 # -- Project information -----------------------------------------------------
 
 project = "LALE"
-copyright = "2019, IBM AI Research"
+project_copyright = "2019-2022, IBM AI Research"
 author = "IBM AI Research"
 
 # The short X.Y version
-version = ""
+version = lale.__version__
 # The full version, including alpha/beta/rc tags
-release = ""
+release = f"{lale.__version__}-dev"
 
 
 sys.path.append(os.path.join(os.path.dirname(__name__), "../lale"))
-import sphinx_rtd_theme  # isort:skip # noqa:E402
+import sphinx_rtd_theme  # isort:skip # noqa:E402  # pylint:disable=wrong-import-position,wrong-import-order
+
+# For packages with mock imports, if we have wrappers without our impl classes,
+# schema validation fails as the mocking adds methods such as `transform`, `predict` etc.
+# when the schema may not have those tags. So we disable schema validation during doc generation.
+set_disable_hyperparams_schema_validation(True)
 
 # This is so that we can detect if we are running a sphinx build
 # and so generate pseudo-classes for documentation
@@ -73,7 +81,8 @@ extensions = [
     "sphinx.ext.imgmath",
     "sphinx.ext.ifconfig",
     "sphinx.ext.viewcode",
-    "m2r",
+    "sphinxcontrib.rsvgconverter",
+    "m2r2",
     "sphinxcontrib.apidoc",
 ]
 apidoc_module_dir = "../lale"
@@ -85,9 +94,10 @@ autoclass_content = "both"
 # Mock requirements to save resources during doc build machine setup
 autodoc_mock_imports = [
     "aif360",
-    "autoai_libs",
-    "autoai_ts_libs",
+    "ConfigSpace",
     "fairlearn",
+    "mystic",
+    "numba",
     "pytorch",
     "tensorflow",
     "torch",
@@ -109,12 +119,12 @@ master_doc = "index"
 #
 # This is also used if you do content translation via gettext catalogs.
 # Usually you set "language" from the command line for these cases.
-language = None
+language = "en"
 
 # List of patterns, relative to source directory, that match files and
 # directories to ignore when looking for source files.
 # This pattern also affects html_static_path and html_extra_path.
-exclude_patterns = ["_build", "Thumbs.db", ".DS_Store"]
+exclude_patterns = ["_build", "Thumbs.db", ".DS_Store", "README-*.md"]
 
 # The name of the Pygments (syntax highlighting) style to use.
 pygments_style = None
@@ -137,7 +147,8 @@ html_theme_path = [sphinx_rtd_theme.get_html_theme_path()]
 # Add any paths that contain custom static files (such as style sheets) here,
 # relative to this directory. They are copied after the builtin static files,
 # so a file named "default.css" will overwrite the builtin "default.css".
-html_static_path = ["_static"]
+# html_static_path = ["_static"]
+html_static_path: List[str] = []
 
 # Custom sidebar templates, must be a dictionary that maps document names
 # to template names.

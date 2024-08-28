@@ -13,11 +13,12 @@
 # limitations under the License.
 
 import pandas as pd
+from packaging import version
 from sklearn.ensemble import StackingRegressor as SKLModel
 
 import lale.docstrings
 import lale.operators
-from lale.lib.lale._common_schemas import schema_cv
+from lale.lib._common_schemas import schema_cv
 
 from .stacking_utils import _concatenate_predictions_pandas
 
@@ -227,5 +228,13 @@ StackingRegressor: lale.operators.PlannedIndividualOp
 StackingRegressor = lale.operators.make_operator(
     _StackingRegressorImpl, _combined_schemas
 )
+
+if lale.operators.sklearn_version >= version.Version("1.1"):
+    from lale.lib._common_schemas import schema_cv_1_1
+
+    StackingRegressor = StackingRegressor.customize_schema(
+        cv=schema_cv_1_1,
+        set_as_available=True,
+    )
 
 lale.docstrings.set_docstrings(StackingRegressor)

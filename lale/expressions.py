@@ -1,4 +1,4 @@
-# Copyright 2020 IBM Corporation
+# Copyright 2020-2022 IBM Corporation
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -17,12 +17,12 @@ import pprint
 import typing
 from copy import deepcopy
 from io import StringIO
-from typing import Any, Dict, Optional, Union
+from typing import Any, Dict, Literal, Optional, Union, overload
 
 import astunparse
 
-AstLits = (ast.Num, ast.Str, ast.List, ast.Tuple, ast.Set, ast.Dict)
-AstLit = Union[ast.Num, ast.Str, ast.List, ast.Tuple, ast.Set, ast.Dict]
+AstLits = (ast.Num, ast.Str, ast.List, ast.Tuple, ast.Set, ast.Dict, ast.Constant)
+AstLit = Union[ast.Num, ast.Str, ast.List, ast.Tuple, ast.Set, ast.Dict, ast.Constant]
 AstExprs = (
     *AstLits,
     ast.Name,
@@ -73,6 +73,10 @@ def fixedUnparse(tree):
 class Expr:
     _expr: AstExpr
 
+    @property
+    def expr(self):
+        return self._expr
+
     def __init__(self, expr: AstExpr, istrue=None):
         # _istrue variable is used to check the boolean nature of
         # '==' and '!=' operator's results.
@@ -95,7 +99,15 @@ class Expr:
             setattr(result, k, deepcopy(v, memo))
         return result
 
-    def __eq__(self, other):
+    # the type: ignore statements are needed because the type of object.__eq__
+    # in typeshed is overly restrictive (to catch common errors)
+    @overload  # type: ignore
+    def __eq__(self, other: Union["Expr", str, int, float, bool]) -> "Expr": ...
+
+    @overload  # type: ignore
+    def __eq__(self, other: None) -> Literal[False]: ...
+
+    def __eq__(self, other: Union["Expr", str, int, float, bool, None]):
         if isinstance(other, Expr):
             comp = ast.Compare(
                 left=self._expr, ops=[ast.Eq()], comparators=[other._expr]
@@ -108,6 +120,12 @@ class Expr:
             return Expr(comp, istrue=False)
         else:
             return False
+
+    @overload
+    def __ge__(self, other: Union["Expr", str, int, float, bool]) -> "Expr": ...
+
+    @overload
+    def __ge__(self, other: None) -> Literal[False]: ...
 
     def __ge__(self, other):
         if isinstance(other, Expr):
@@ -142,6 +160,12 @@ class Expr:
         subscript = ast.Subscript(value=self._expr, slice=key_ast)
         return Expr(subscript)
 
+    @overload
+    def __gt__(self, other: Union["Expr", str, int, float, bool]) -> "Expr": ...
+
+    @overload
+    def __gt__(self, other: None) -> Literal[False]: ...
+
     def __gt__(self, other):
         if isinstance(other, Expr):
             comp = ast.Compare(
@@ -155,6 +179,12 @@ class Expr:
             return Expr(comp)
         else:
             return False
+
+    @overload
+    def __le__(self, other: Union["Expr", str, int, float, bool]) -> "Expr": ...
+
+    @overload
+    def __le__(self, other: None) -> Literal[False]: ...
 
     def __le__(self, other):
         if isinstance(other, Expr):
@@ -172,6 +202,12 @@ class Expr:
         else:
             return False
 
+    @overload
+    def __lt__(self, other: Union["Expr", str, int, float, bool]) -> "Expr": ...
+
+    @overload
+    def __lt__(self, other: None) -> Literal[False]: ...
+
     def __lt__(self, other):
         if isinstance(other, Expr):
             comp = ast.Compare(
@@ -185,6 +221,12 @@ class Expr:
             return Expr(comp)
         else:
             return False
+
+    @overload  # type: ignore
+    def __ne__(self, other: Union["Expr", str, int, float, bool]) -> "Expr": ...
+
+    @overload  # type: ignore
+    def __ne__(self, other: None) -> Literal[False]: ...
 
     def __ne__(self, other):
         if isinstance(other, Expr):
@@ -209,16 +251,114 @@ class Expr:
                 result = result[1:-1]
         return result
 
-    def __truediv__(self, other):
-        return _make_call_expr("ratio", self, other)
+    @overload
+    def __add__(self, other: Union["Expr", str, int, float, bool]) -> "Expr": ...
 
-    def __sub__(self, other):
-        return _make_call_expr("subtract", self, other)
+    @overload
+    def __add__(self, other: None) -> Literal[False]: ...
+
+    def __add__(self, other) -> Union["Expr", Literal[False]]:
+        return _make_binop(ast.Add(), self._expr, other)
+
+    @overload
+    def __sub__(self, other: Union["Expr", str, int, float, bool]) -> "Expr": ...
+
+    @overload
+    def __sub__(self, other: None) -> Literal[False]: ...
+
+    def __sub__(self, other) -> Union["Expr", Literal[False]]:
+        return _make_binop(ast.Sub(), self._expr, other)
+
+    @overload
+    def __mul__(self, other: Union["Expr", str, int, float, bool]) -> "Expr": ...
+
+    @overload
+    def __mul__(self, other: None) -> Literal[False]: ...
+
+    def __mul__(self, other) -> Union["Expr", Literal[False]]:
+        return _make_binop(ast.Mult(), self._expr, other)
+
+    @overload
+    def __truediv__(self, other: Union["Expr", str, int, float, bool]) -> "Expr": ...
+
+    @overload
+    def __truediv__(self, other: None) -> Literal[False]: ...
+
+    def __truediv__(self, other) -> Union["Expr", Literal[False]]:
+        return _make_binop(ast.Div(), self._expr, other)
+
+    @overload
+    def __floordiv__(self, other: Union["Expr", str, int, float, bool]) -> "Expr": ...
+
+    @overload
+    def __floordiv__(self, other: None) -> Literal[False]: ...
+
+    def __floordiv__(self, other) -> Union["Expr", Literal[False]]:
+        return _make_binop(ast.FloorDiv(), self._expr, other)
+
+    @overload
+    def __mod__(self, other: Union["Expr", str, int, float, bool]) -> "Expr": ...
+
+    @overload
+    def __mod__(self, other: None) -> Literal[False]: ...
+
+    def __mod__(self, other) -> Union["Expr", Literal[False]]:
+        return _make_binop(ast.Mod(), self._expr, other)
+
+    @overload
+    def __pow__(self, other: Union["Expr", str, int, float, bool]) -> "Expr": ...
+
+    @overload
+    def __pow__(self, other: None) -> Literal[False]: ...
+
+    def __pow__(self, other) -> Union["Expr", Literal[False]]:
+        return _make_binop(ast.Pow(), self._expr, other)
+
+    @overload
+    def __and__(self, other: Union["Expr", str, int, float, bool]) -> "Expr": ...
+
+    @overload
+    def __and__(self, other: None) -> Literal[False]: ...
+
+    def __and__(self, other) -> Union["Expr", Literal[False]]:
+        return _make_binop(ast.BitAnd(), self._expr, other)
+
+    @overload
+    def __or__(self, other: Union["Expr", str, int, float, bool]) -> "Expr": ...
+
+    @overload
+    def __or__(self, other: None) -> Literal[False]: ...
+
+    def __or__(self, other) -> Union["Expr", Literal[False]]:
+        return _make_binop(ast.BitOr(), self._expr, other)
 
 
-def _make_ast_expr(arg: Union[Expr, int, float, str, AstExpr]) -> AstExpr:
-    if isinstance(arg, Expr):
-        return arg._expr
+@overload
+def _make_binop(op, left: Any, other: Union[Expr, str, int, float, bool]) -> Expr: ...
+
+
+@overload
+def _make_binop(op, left: Any, other: None) -> Literal[False]: ...
+
+
+def _make_binop(
+    op, left: Any, other: Union[Expr, str, int, float, bool, None]
+) -> Union["Expr", Literal[False]]:
+    if isinstance(other, Expr):
+        e = ast.BinOp(left=left, op=op, right=other.expr)
+        return Expr(e)
+    elif other is not None:
+        e = ast.BinOp(left=left, op=op, right=ast.Constant(value=other))
+        return Expr(e)
+    else:
+        return False
+
+
+def _make_ast_expr(arg: Union[None, Expr, int, float, str, AstExpr]) -> AstExpr:
+    if arg is None:
+        return ast.Constant(value=None)
+    elif isinstance(arg, Expr):
+        return arg.expr
     elif isinstance(arg, (int, float)):
         return ast.Num(n=arg)
     elif isinstance(arg, str):
@@ -228,11 +368,21 @@ def _make_ast_expr(arg: Union[Expr, int, float, str, AstExpr]) -> AstExpr:
         return arg
 
 
-def _make_call_expr(name: str, *args: Union[Expr, AstExpr, int, str]) -> Expr:
+def _make_call_expr(
+    name: str, *args: Union[Expr, AstExpr, int, float, bool, str, None]
+) -> Expr:
     func_ast = ast.Name(id=name)
     args_asts = [_make_ast_expr(arg) for arg in args]
     call_ast = ast.Call(func=func_ast, args=args_asts, keywords=[])
     return Expr(call_ast)
+
+
+def string_indexer(subject: Expr) -> Expr:
+    return _make_call_expr("string_indexer", subject)
+
+
+def collect_set(group: Expr) -> Expr:
+    return _make_call_expr("collect_set", group)
 
 
 def count(group: Expr) -> Expr:
@@ -271,7 +421,7 @@ def item(group: Expr, value: Union[int, str]) -> Expr:
     return _make_call_expr("item", group, value)
 
 
-def max(group: Expr) -> Expr:
+def max(group: Expr) -> Expr:  # pylint:disable=redefined-builtin
     return _make_call_expr("max", group)
 
 
@@ -283,7 +433,7 @@ def mean(group: Expr) -> Expr:
     return _make_call_expr("mean", group)
 
 
-def min(group: Expr) -> Expr:
+def min(group: Expr) -> Expr:  # pylint:disable=redefined-builtin
     return _make_call_expr("min", group)
 
 
@@ -315,18 +465,54 @@ def recent_gap_to_cutoff(series: Expr, cutoff: Expr, age: int) -> Expr:
     return _make_call_expr("recent_gap_to_cutoff", series, cutoff, age)
 
 
-def replace(subject: Expr, old2new: Dict[Any, Any]) -> Expr:
+def replace(
+    subject: Expr,
+    old2new: Dict[Any, Any],
+    handle_unknown: str = "identity",
+    unknown_value=None,
+) -> Expr:
     old2new_str = pprint.pformat(old2new)
     module_ast = ast.parse(old2new_str)
     old2new_ast = typing.cast(ast.Expr, module_ast.body[0])
-    return _make_call_expr("replace", subject, old2new_ast)
+    assert handle_unknown in ["identity", "use_encoded_value"]
+    return _make_call_expr(
+        "replace",
+        subject,
+        old2new_ast,
+        handle_unknown,
+        unknown_value,
+    )
+
+
+def ite(
+    cond: Expr,
+    v1: Union[Expr, int, float, bool, str],
+    v2: Union[Expr, int, float, bool, str],
+) -> Expr:
+    if not isinstance(v1, Expr):
+        v1 = Expr(ast.Constant(value=v1))
+    if not isinstance(v2, Expr):
+        v2 = Expr(ast.Constant(value=v2))
+    return _make_call_expr("ite", cond, v1, v2)
 
 
 def identity(subject: Expr) -> Expr:
     return _make_call_expr("identity", subject)
 
 
-def sum(group: Expr) -> Expr:
+def astype(dtype, subject: Expr) -> Expr:
+    return _make_call_expr("astype", dtype, subject)
+
+
+def hash(hash_method: str, subject: Expr) -> Expr:  # pylint:disable=redefined-builtin
+    return _make_call_expr("hash", hash_method, subject)
+
+
+def hash_mod(hash_method: str, subject: Expr, n: Expr) -> Expr:
+    return _make_call_expr("hash_mod", hash_method, subject, n)
+
+
+def sum(group: Expr) -> Expr:  # pylint:disable=redefined-builtin
     return _make_call_expr("sum", group)
 
 
@@ -370,10 +556,6 @@ def window_variance_trend(series: Expr, size: int) -> Expr:
     return _make_call_expr("window_variance_trend", series, size)
 
 
-def string_indexer(subject: Expr) -> Expr:
-    return _make_call_expr("string_indexer", subject)
-
-
 def first(group: Expr) -> Expr:
     return _make_call_expr("first", group)
 
@@ -402,12 +584,49 @@ def desc(column: Union[Expr, str]) -> Expr:
     return _make_call_expr("desc", column)
 
 
-def ratio(num: Expr, denom: Expr) -> Expr:
-    return _make_call_expr("ratio", num, denom)
+def median(group: Expr) -> Expr:
+    return _make_call_expr("median", group)
 
 
-def subtract(op1: Expr, op2: Expr) -> Expr:
-    return _make_call_expr("subtract", op1, op2)
+def mode(group: Expr) -> Expr:
+    return _make_call_expr("mode", group)
 
 
 it = Expr(ast.Name(id="it"))
+
+
+def _it_column(expr):
+    if isinstance(expr, ast.Attribute):
+        if _is_ast_name_it(expr.value):
+            return expr.attr
+        else:
+            raise ValueError(
+                f"Illegal {fixedUnparse(expr)}. Only the access to `it` is supported"
+            )
+    elif isinstance(expr, ast.Subscript):
+        if isinstance(expr.slice, ast.Constant) or (
+            _is_ast_name_it(expr.value) and isinstance(expr.slice, ast.Index)
+        ):
+            v = getattr(expr.slice, "value", None)
+            if isinstance(expr.slice, ast.Constant):
+                return v
+            elif isinstance(v, ast.Constant):
+                return v.value
+            elif isinstance(v, ast.Str):
+                return v.s
+            else:
+                raise ValueError(
+                    f"Illegal {fixedUnparse(expr)}. Only the access to `it` is supported"
+                )
+        else:
+            raise ValueError(
+                f"Illegal {fixedUnparse(expr)}. Only the access to `it` is supported"
+            )
+    else:
+        raise ValueError(
+            f"Illegal {fixedUnparse(expr)}. Only the access to `it` is supported"
+        )
+
+
+def _is_ast_name_it(expr):
+    return isinstance(expr, ast.Name) and expr.id == "it"

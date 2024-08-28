@@ -4,8 +4,8 @@ Papers
 
 "Pipeline Combinators for Gradual AutoML".
 Guillaume Baudart, Martin Hirzel, Kiran Kate, Parikshit Ram, Avraham Shinnar, and Jason Tsay.
-Conference on Neural Information Processing Systems (NeurIPS), December 2021.
-http://hirzels.com/martin/papers/neurips21-lale.pdf
+Conference on Neural Information Processing Systems (NeurIPS), pages 19705-19718, December 2021.
+https://proceedings.neurips.cc/paper/2021/file/a3b36cb25e2e0b93b5f334ffb4e4064e-Paper.pdf
 
 **This is the preferred citation for the Lale project.**
 
@@ -16,7 +16,122 @@ http://hirzels.com/martin/papers/neurips21-lale.pdf
       author = "Baudart, Guillaume and Hirzel, Martin and Kate, Kiran and Ram, Parikshit and Shinnar, Avraham and Tsay, Jason",
       booktitle = "Advances in Neural Information Processing Systems (NeurIPS)",
       year = 2021,
-      month = dec }
+      month = dec,
+      pages = "19705--19718",
+      url = "https://proceedings.neurips.cc/paper/2021/file/a3b36cb25e2e0b93b5f334ffb4e4064e-Paper.pdf" }
+
+
+"Searching for Fairer Machine Learning Ensembles,
+Michael Feffer, Martin Hirzel, Samuel C. Hoffman, Kiran Kate, Parikshit Ram, and Avraham Shinnar.
+Conference on Automated Machine Learning (AutoML), September 2023.
+
+.. code:: BibTeX
+
+    @InProceedings{feffer_et_al_2023,
+      title = "Searching for Fairer Machine Learning Ensembles",
+      author = "Feffer, Michael and Hirzel, Martin and Hoffman, Samuel C. and Kate, Kiran and Ram, Parikshit and Shinnar, Avraham",
+      booktitle = "Conference on Automated Machine Learning (AutoML)",
+      year = 2023,
+      month = sep }
+
+
+"A Suite of Fairness Datasets for Tabular Classification",
+Martin Hirzel and Michael Feffer.
+arXiv:2308.00133 [cs.LG], July 2023.
+https://arxiv.org/abs/2308.00133
+
+.. code:: BibTeX
+
+    @Misc{hirzel_feffer_2023,
+      title = "A Suite of Fairness Datasets for Tabular Classification",
+      author = "Hirzel, Martin and Feffer, Michael",
+      year = 2023,
+      month = jul,
+      url = "https://arxiv.org/abs/2308.00133" }
+
+
+"AI for Low-Code for AI",
+Nikitha Rao, Jason Tsay, Kiran Kate, Vincent J. Hellendoorn, and Martin Hirzel.
+arXiv:2305.20015 [cs.SE], May 2023.
+https://arxiv.org/abs/2305.20015
+
+.. code:: BibTeX
+
+    @Misc{rao_et_al_2023,
+      title = "{AI} for Low-Code for {AI}",
+      author = "Rao, Nikitha and Tsay, Jason and Kate, Kiran and Hellendoorn, Vincent J. and Hirzel, Martin",
+      year = 2023,
+      month = may,
+      url = "https://arxiv.org/abs/2305.20015" }
+
+
+"Gradual AutoML using Lale".
+Kiran Kate, Martin Hirzel, Parikshit Ram, Avraham Shinnar, and Jason Tsay.
+Tutorial at Conference on Knowledge Discovery and Data Mining (KDD-Tutorial), August 2022.
+https://doi.org/10.1145/3534678.3542630
+
+.. code:: BibTeX
+
+    @InProceedings{kate_et_al_2022,
+      author = "Kate, Kiran and Hirzel, Martin and Ram, Parikshit and Shinnar, Avraham and Tsay, Jason",
+      title = "Gradual {AutoML} using {Lale}",
+      booktitle = "Tutorial at the Conference on Knowledge Discovery and Data Mining (KDD-Tutorial)",
+      year = 2022,
+      month = aug,
+      pages = "4794--4795",
+      url = "https://doi.org/10.1145/3534678.3542630" }
+
+
+"An Empirical Study of Modular Bias Mitigators and Ensembles".
+Michael Feffer, Martin Hirzel, Samuel C. Hoffman, Kiran Kate, Parikshit Ram, and Avraham Shinnar.
+Workshop on Benchmarking Data for Data-Centric AI (DataPerf@ICML), July 2022.
+http://hirzels.com/martin/papers/dataperf22-fair-ensembles.pdf
+
+.. code:: BibTeX
+
+    @InProceedings{feffer_et_al_2022,
+      title = "An Empirical Study of Modular Bias Mitigators and Ensembles",
+      author = "Feffer, Michael and Hirzel, Martin and Hoffman, Samuel C. and Kate, Kiran and Ram, Parikshit and Shinnar, Avraham",
+      booktitle = "Workshop on Benchmarking Data for Data-Centric AI (DataPerf@ICML)",
+      year = 2022,
+      month = jul,
+      url = "http://hirzels.com/martin/papers/dataperf22-fair-ensembles.pdf" }
+
+
+"The Raise of Machine Learning Hyperparameter Constraints in Python Code".
+Ingkarat Rak-amnouykit, Ana Milanova, Guillaume Baudart, Martin Hirzel, and Julian Dolby.
+International Symposium on Software Testing and Analysis (ISSTA), pages 580-592, July 2022.
+https://doi.org/10.1145/3533767.3534400
+
+**Winner of a Distinguished Paper Award at ISSTA 2022.**
+
+.. code:: BibTeX
+
+    @InProceedings{rakamnouykit_et_al_2022,
+      title = "The Raise of Machine Learning Hyperparameter Constraints in {Python} Code",
+      author = "Rak-amnouykit, Ingkarat and Milanova, Ana and Baudart, Guillaume and Hirzel, Martin and Dolby, Julian",
+      booktitle = "International Symposium on Software Testing and Analysis (ISSTA)",
+      year = 2022,
+      pages = "580--592",
+      month = jul,
+      url = "https://doi.org/10.1145/3533767.3534400" }
+
+
+"Automatically Debugging AutoML Pipelines Using Maro: ML Automated Remediation Oracle".
+Julian Dolby, Jason Tsay, and Martin Hirzel.
+Symposium on Machine Programming (MAPS), pages 60-69, June 2022.
+
+.. code:: BibTeX
+
+    @InProceedings{dolby_tsay_hirzel_2022,
+      title = "Automatically Debugging {AutoML} Pipelines Using {Maro}: {ML} Automated Remediation Oracle",
+      author = "Dolby, Julian and Tsay, Jason and Hirzel, Martin",
+      booktitle = "Symposium on Machine Programming (MAPS)",
+      year = 2022,
+      month = jun,
+      pages = "60--69",
+      url = "https://dl.acm.org/doi/10.1145/3520312.3534868" }
+
 
 "RASL: Relational Algebra in Scikit-Learn Pipelines".
 Chirag Sahni, Kiran Kate, Avraham Shinnar, Hoang Thanh Lam, and Martin Hirzel.
@@ -32,6 +147,7 @@ https://openreview.net/forum?id=u9ct1gjoDcn
       year = 2021,
       month = dec,
       url = "https://openreview.net/forum?id=u9ct1gjoDcn" }
+
 
 "Finding Data Compatibility Bugs with JSON Subschema Checking".
 Andrew Habib, Avraham Shinnar, Martin Hirzel, and Michael Pradel.
@@ -50,9 +166,10 @@ https://doi.org/10.1145/3460319.3464796
       pages = "620--632",
       url = "https://doi.org/10.1145/3460319.3464796" }
 
+
 "Engineering Fair Machine Learning Pipelines".
 Martin Hirzel, Kiran Kate, and Parikshit Ram.
-ICLR Workshop on Responsible AI (RAI@ICLR), May 2021. 
+ICLR Workshop on Responsible AI (RAI@ICLR), May 2021.
 http://hirzels.com/martin/papers/rai21-fairness.pdf
 
 .. code:: BibTeX
@@ -65,11 +182,12 @@ http://hirzels.com/martin/papers/rai21-fairness.pdf
       month = may,
       url = "http://hirzels.com/martin/papers/rai21-fairness.pdf" }
 
+
 "Extracting Hyperparameter Constraints from Code".
 Ingkarat Rak-amnouykit, Ana Milanova, Guillaume Baudart,
 Martin Hirzel, and Julian Dolby.
 ICLR Workshop on Security and Safety in Machine Learning Systems (SecML@ICLR),
-May 2021. 
+May 2021.
 https://aisecure-workshop.github.io/aml-iclr2021/papers/18.pdf
 
 .. code:: BibTeX
@@ -81,6 +199,7 @@ https://aisecure-workshop.github.io/aml-iclr2021/papers/18.pdf
       year = 2021,
       month = may,
       url = "https://aisecure-workshop.github.io/aml-iclr2021/papers/18.pdf" }
+
 
 "Lale: Consistent Automated Machine Learning".
 Guillaume Baudart, Martin Hirzel, Kiran Kate, Parikshit Ram, and
@@ -98,6 +217,7 @@ https://arxiv.org/abs/2007.01977
       month = aug,
       url = "https://arxiv.org/abs/2007.01977" }
 
+
 "Mining Documentation to Extract Hyperparameter Schemas".
 Guillaume Baudart, Peter Kirchner, Martin Hirzel, and Kiran Kate.
 ICML Workshop on Automated Machine Learning (AutoML@ICML), July 2020.
@@ -113,7 +233,8 @@ https://arxiv.org/abs/2006.16984
       year = 2020,
       url = "https://arxiv.org/abs/2006.16984" }
 
-"A semi-supervised Deep Learning Algorithm for Abnormal EEG Identification".
+
+"A Semi-supervised Deep Learning Algorithm for Abnormal EEG Identification".
 Subhrajit Roy, Kiran Kate, and Martin Hirzel.
 Machine Learning for Health Workshop at NeurIPS (ML4H), December 2019.
 https://arxiv.org/abs/1903.07822v2
@@ -121,12 +242,13 @@ https://arxiv.org/abs/1903.07822v2
 .. code:: BibTeX
 
     @InProceedings{roy_kate_hirzel_2019,
-      title = "A semi-supervised Deep Learning Algorithm for Abnormal {EEG} Identification",
+      title = "A Semi-supervised Deep Learning Algorithm for Abnormal {EEG} Identification",
       author = "Roy, Subhrajit and Kate, Kiran and Hirzel, Martin",
       booktitle = "Machine Learning for Health Workshop at NeurIPS (ML4H)",
       month = dec,
       year = 2019,
       url = "https://arxiv.org/abs/1903.07822v2" }
+
 
 "Type Safety with JSON Subschema".
 Andrew Habib, Avraham Shinnar, Martin Hirzel, and Michael Pradel.
@@ -143,6 +265,7 @@ https://arxiv.org/abs/1911.12651
       year = 2019,
       month = nov,
       url = "https://arxiv.org/abs/1911.12651" }
+
 
 "Type-Driven Automated Learning with Lale".
 Martin Hirzel, Kiran Kate, Avraham Shinnar, Subhrajit Roy, and Parikshit Ram.

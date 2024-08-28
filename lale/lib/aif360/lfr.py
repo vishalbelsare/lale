@@ -1,4 +1,4 @@
-# Copyright 2019, 2020, 2021 IBM Corporation
+# Copyright 2019-2023 IBM Corporation
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -13,7 +13,6 @@
 # limitations under the License.
 
 import aif360.algorithms.preprocessing
-import aif360.datasets
 import pandas as pd
 
 import lale.docstrings
@@ -42,13 +41,7 @@ class _LFRImpl:
         unfavorable_labels=None,
         redact=True,
         preparation=None,
-        k=5,
-        Ax=0.01,
-        Az=1.0,
-        Ay=50.0,
-        print_interval=250,
-        verbose=0,
-        seed=None,
+        **hyperparams,
     ):
         _validate_fairness_info(
             favorable_labels, protected_attributes, unfavorable_labels, False
@@ -66,18 +59,12 @@ class _LFRImpl:
         self.mitigator = aif360.algorithms.preprocessing.LFR(
             unprivileged_groups=unprivileged_groups,
             privileged_groups=privileged_groups,
-            k=k,
-            Ax=Ax,
-            Az=Az,
-            Ay=Ay,
-            print_interval=print_interval,
-            verbose=verbose,
-            seed=seed,
+            **hyperparams,
         )
 
     def _prep_and_encode(self, X, y=None):
         prepared_X = self.redact1_and_prep.transform(X, y)
-        encoded_X, encoded_y = self.prot_attr_enc.transform(X, y)
+        encoded_X, encoded_y = self.prot_attr_enc.transform_X_y(X, y)
         combined_attribute_names = list(prepared_X.columns) + [
             name for name in encoded_X.columns if name not in prepared_X.columns
         ]
@@ -108,7 +95,6 @@ class _LFRImpl:
         self.prot_attr_enc = ProtectedAttributesEncoder(
             **fairness_info,
             remainder="drop",
-            return_X_y=True,
         )
         prot_attr_names = [pa["feature"] for pa in self.protected_attributes]
         self.pandas_to_dataset = _PandasToDatasetConverter(

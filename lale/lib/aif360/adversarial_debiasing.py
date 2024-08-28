@@ -1,4 +1,4 @@
-# Copyright 2020, 2021 IBM Corporation
+# Copyright 2020-2023 IBM Corporation
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -12,21 +12,23 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import aif360.algorithms.inprocessing
-
-try:
-    import tensorflow as tf
-
-    tensorflow_installed = True
-except ImportError:
-    tensorflow_installed = False
-
+import contextlib
+import io
+import os
 import uuid
+
+import packaging.version
 
 import lale.docstrings
 import lale.operators
 
-from .util import (
+# suppress spurious warnings from TensorFlow that are caused by
+# indirectly importing it via aif360.algorithms.inprocessing
+os.environ["TF_CPP_MIN_LOG_LEVEL"] = "3"
+
+import aif360.algorithms.inprocessing  # noqa:E402 # pylint:disable=wrong-import-position,wrong-import-order
+
+from .util import (  # noqa:E402 # pylint:disable=wrong-import-position,wrong-import-order
     _BaseInEstimatorImpl,
     _categorical_fairness_properties,
     _categorical_input_predict_proba_schema,
@@ -36,9 +38,16 @@ from .util import (
     _categorical_supervised_input_fit_schema,
 )
 
+try:
+    import tensorflow as tf
+
+    tensorflow_installed = True
+except ImportError:
+    tensorflow_installed = False
+
 
 class _AdversarialDebiasingImpl(_BaseInEstimatorImpl):
-    def __init__(
+    def __init__(  # pylint:disable=super-init-not-called
         self,
         *,
         favorable_labels,
@@ -47,38 +56,29 @@ class _AdversarialDebiasingImpl(_BaseInEstimatorImpl):
         redact=True,
         preparation=None,
         scope_name="adversarial_debiasing",
-        sess=None,
-        seed=None,
-        adversary_loss_weight=0.1,
-        num_epochs=50,
-        batch_size=128,
-        classifier_num_hidden_units=200,
-        debias=True,
+        verbose=0,
+        **hyperparams,
     ):
         assert tensorflow_installed, """Your Python environment does not have tensorflow installed. You can install it with
     pip install tensorflow
 or with
     pip install 'lale[full]'"""
-        assert "1.13.1" <= tf.__version__
+        tf_version = packaging.version.parse(getattr(tf, "__version__"))
+        assert packaging.version.Version("1.13.1") <= tf_version, tf_version
         self.scope_name = scope_name
         self.protected_attributes = protected_attributes
-        self.seed = seed
-        self.sess = sess
-        self.adversary_loss_weight = adversary_loss_weight
-        self.num_epochs = num_epochs
-        self.batch_size = batch_size
-        self.classifier_num_hidden_units = classifier_num_hidden_units
-        self.debias = debias
         self.favorable_labels = favorable_labels
         self.unfavorable_labels = unfavorable_labels
         self.redact = redact
         self.preparation = preparation
+        self.verbose = verbose
+        self.hyperparams = hyperparams
 
     def fit(self, X, y=None):
         tf.compat.v1.disable_eager_execution()
         tf.compat.v1.reset_default_graph()
-        if self.sess is None:
-            self.sess = tf.compat.v1.Session()
+        if self.hyperparams.get("sess", None) is None:
+            self.hyperparams["sess"] = tf.compat.v1.Session()
         prot_attr_names = [pa["feature"] for pa in self.protected_attributes]
         unprivileged_groups = [{name: 0 for name in prot_attr_names}]
         privileged_groups = [{name: 1 for name in prot_attr_names}]
@@ -86,15 +86,9 @@ or with
             unprivileged_groups=unprivileged_groups,
             privileged_groups=privileged_groups,
             scope_name=self.scope_name + str(uuid.uuid4()),
-            sess=self.sess,
-            seed=self.seed,
-            adversary_loss_weight=self.adversary_loss_weight,
-            num_epochs=self.num_epochs,
-            batch_size=self.batch_size,
-            classifier_num_hidden_units=self.classifier_num_hidden_units,
-            debias=self.debias,
+            **self.hyperparams,
         )
-        super(_AdversarialDebiasingImpl, self).__init__(
+        super().__init__(
             favorable_labels=self.favorable_labels,
             protected_attributes=self.protected_attributes,
             unfavorable_labels=self.unfavorable_labels,
@@ -102,7 +96,12 @@ or with
             preparation=self.preparation,
             mitigator=mitigator,
         )
-        return super(_AdversarialDebiasingImpl, self).fit(X, y)
+        if self.verbose == 0:
+            with contextlib.redirect_stdout(io.StringIO()):
+                super().fit(X, y)
+        else:
+            super().fit(X, y)
+        return self
 
 
 _input_fit_schema = _categorical_supervised_input_fit_schema
@@ -130,6 +129,7 @@ _hyperparams_schema = {
                 "batch_size",
                 "classifier_num_hidden_units",
                 "debias",
+                "verbose",
             ],
             "relevantToOptimizer": [
                 "adversary_loss_weight",
@@ -215,6 +215,11 @@ _hyperparams_schema = {
                     "description": "Learn a classifier with or without debiasing.",
                     "type": "boolean",
                     "default": True,
+                },
+                "verbose": {
+                    "description": "If zero, then no output.",
+                    "type": "integer",
+                    "default": 0,
                 },
             },
         },

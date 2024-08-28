@@ -13,12 +13,16 @@
 # limitations under the License.
 
 import pandas as pd
-import scipy.sparse.csr
+import scipy.sparse
 import sklearn
 import sklearn.preprocessing
+from packaging import version
 
 import lale.docstrings
 import lale.operators
+from lale.schemas import AnyOf, Bool, Enum
+
+sklearn_version = version.parse(getattr(sklearn, "__version__"))
 
 _hyperparams_schema = {
     "description": "Hyperparameter schema for the OneHotEncoder model from scikit-learn.",
@@ -27,7 +31,7 @@ _hyperparams_schema = {
             "description": "This first object lists all constructor arguments with their types, but omits constraints for conditional hyperparameters.",
             "type": "object",
             "additionalProperties": False,
-            "required": ["categories", "sparse", "dtype", "handle_unknown"],
+            "required": ["categories", "dtype", "handle_unknown"],
             "relevantToOptimizer": [],
             "properties": {
                 "categories": {
@@ -77,7 +81,6 @@ _hyperparams_schema = {
 }
 
 _input_fit_schema = {
-    "description": "Input data schema for training the OneHotEncoder model from scikit-learn.",
     "type": "object",
     "required": ["X"],
     "additionalProperties": False,
@@ -95,7 +98,6 @@ _input_fit_schema = {
 }
 
 _input_transform_schema = {
-    "description": "Input data schema for predictions using the OneHotEncoder model from scikit-learn.",
     "type": "object",
     "required": ["X"],
     "additionalProperties": False,
@@ -112,7 +114,7 @@ _input_transform_schema = {
 }
 
 _output_transform_schema = {
-    "description": "Output data schema for predictions (projected data) using the OneHotEncoder model from scikit-learn. See the official documentation for details: https://scikit-learn.org/0.20/modules/generated/sklearn.preprocessing.OneHotEncoder.html\n",
+    "description": "One-hot codes.",
     "type": "array",
     "items": {"type": "array", "items": {"type": "number"}},
 }
@@ -138,8 +140,7 @@ _combined_schemas = {
 
 class _OneHotEncoderImpl:
     def __init__(self, **hyperparams):
-        self._hyperparams = hyperparams
-        self._wrapped_model = sklearn.preprocessing.OneHotEncoder(**self._hyperparams)
+        self._wrapped_model = sklearn.preprocessing.OneHotEncoder(**hyperparams)
 
     def fit(self, X, y=None):
         self._wrapped_model.fit(X, y)
@@ -150,8 +151,11 @@ class _OneHotEncoderImpl:
     def transform(self, X):
         result = self._wrapped_model.transform(X)
         if isinstance(X, pd.DataFrame):
-            columns = self._wrapped_model.get_feature_names(X.columns)
-            if isinstance(result, scipy.sparse.csr.csr_matrix):
+            if sklearn_version >= version.Version("1.0"):
+                columns = self._wrapped_model.get_feature_names_out(X.columns)
+            else:
+                columns = self._wrapped_model.get_feature_names(X.columns)
+            if isinstance(result, scipy.sparse.csr_matrix):
                 result = result.toarray()
             result = pd.DataFrame(data=result, index=X.index, columns=columns)
         return result
@@ -172,7 +176,10 @@ class _OneHotEncoderImpl:
             in_names = self._X_columns
         if in_names is None:
             return _output_transform_schema
-        out_names = self._wrapped_model.get_feature_names(in_names)
+        if sklearn_version >= version.Version("1.0"):
+            out_names = self._wrapped_model.get_feature_names_out(in_names)
+        else:
+            out_names = self._wrapped_model.get_feature_names(in_names)
         result = {
             **s_X,
             "items": {
@@ -187,7 +194,7 @@ class _OneHotEncoderImpl:
 
 OneHotEncoder = lale.operators.make_operator(_OneHotEncoderImpl, _combined_schemas)
 
-if sklearn.__version__ >= "0.21":
+if sklearn_version >= version.Version("0.21"):
     # new: https://scikit-learn.org/0.21/modules/generated/sklearn.preprocessing.OneHotEncoder.html
     OneHotEncoder = OneHotEncoder.customize_schema(
         drop={
@@ -205,6 +212,8 @@ if sklearn.__version__ >= "0.21":
         },
         set_as_available=True,
     )
+if version.Version("0.21") <= sklearn_version < version.Version("1.0"):
+    # new: https://scikit-learn.org/0.21/modules/generated/sklearn.preprocessing.OneHotEncoder.html
     OneHotEncoder = OneHotEncoder.customize_schema(
         constraint={
             "description": "'handle_unknown' must be 'error' when the drop parameter is specified, as both would create categories that are all zero.",
@@ -219,7 +228,7 @@ if sklearn.__version__ >= "0.21":
         set_as_available=True,
     )
 
-if sklearn.__version__ >= "0.23":
+if sklearn_version >= version.Version("0.23"):
     # new: https://scikit-learn.org/0.23/modules/generated/sklearn.preprocessing.OneHotEncoder.html
     OneHotEncoder = OneHotEncoder.customize_schema(
         drop={
@@ -237,5 +246,75 @@ if sklearn.__version__ >= "0.23":
         },
         set_as_available=True,
     )
+
+if sklearn_version >= version.Version("1.1"):
+    # new: https://scikit-learn.org/1.1/modules/generated/sklearn.preprocessing.OneHotEncoder.html
+    OneHotEncoder = OneHotEncoder.customize_schema(
+        handle_unknown={
+            "description": "Specifies the way unknown categories are handled during transform.",
+            "anyOf": [
+                {
+                    "enum": ["error"],
+                    "description": "Raise an error if an unknown category is present during transform.",
+                },
+                {
+                    "enum": ["ignore"],
+                    "description": "When an unknown category is encountered during transform, the resulting one-hot encoded columns for this feature will be all zeros. In the inverse transform, an unknown category will be denoted as None.",
+                },
+                {
+                    "enum": ["infrequent_if_exist"],
+                    "description": "When an unknown category is encountered during transform, the resulting one-hot encoded columns for this feature will map to the infrequent category if it exists. The infrequent category will be mapped to the last position in the encoding. During inverse transform, an unknown category will be mapped to the category denoted ``'infrequent'`` if it exists. If the ``'infrequent'`` category does not exist, then transform and inverse_transform will handle an unknown category as with ``handle_unknown='ignore'``. Infrequent categories exist based on ``min_frequency`` and ``max_categories``. Read more in the User Guide.",
+                },
+            ],
+            "default": "error",
+        },
+        set_as_available=True,
+    )
+
+if sklearn_version >= version.Version("1.2"):
+    # new: https://scikit-learn.org/1.2/modules/generated/sklearn.preprocessing.OneHotEncoder.html
+    OneHotEncoder = OneHotEncoder.customize_schema(
+        sparse=AnyOf(
+            [
+                Bool(
+                    desc="Will return sparse matrix if set true, else array.",
+                    default=True,
+                    forOptimizer=False,
+                ),
+                Enum(values=["deprecated"]),
+            ],
+            default="deprecated",
+        ),
+        sparse_output=Bool(
+            desc="Will return sparse matrix if set true, else will return an array.",
+            default=True,
+        ),
+    )
+
+if sklearn_version >= version.Version("1.3"):
+    # new: https://scikit-learn.org/1.3/modules/generated/sklearn.preprocessing.OneHotEncoder.html
+    OneHotEncoder = OneHotEncoder.customize_schema(
+        feature_name_combiner={
+            "anyOf": [
+                {
+                    "enum": ["concat"],
+                    "description": 'concatenates encoded feature name and category with feature + "_" + str(category).E.g. feature X with values 1, 6, 7 create feature names X_1, X_6, X_7.',
+                },
+                {
+                    "laleType": "callable",
+                    "forOptimizer": False,
+                    "description": "Callable with signature def callable(input_feature, category) that returns a string",
+                },
+            ],
+            "default": "concat",
+            "description": "Used to create feature names to be returned by get_feature_names_out.",
+        },
+        set_as_available=True,
+    )
+
+if sklearn_version >= version.Version("1.4"):
+    # new: https://scikit-learn.org/1.2/modules/generated/sklearn.preprocessing.OneHotEncoder.html
+    OneHotEncoder = OneHotEncoder.customize_schema(sparse=None, set_as_available=True)
+
 
 lale.docstrings.set_docstrings(OneHotEncoder)

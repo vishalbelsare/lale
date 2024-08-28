@@ -1,4 +1,4 @@
-# Copyright 2019 IBM Corporation
+# Copyright 2019-2023 IBM Corporation
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -36,6 +36,19 @@ class TestToGraphviz(unittest.TestCase):
         optimizable = kernel_tfm_or_not >> tfm >> clf
         optimizable.visualize(ipython_display=False)
 
+    def test_url_generation(self):
+        from graphviz import Source
+
+        from lale.lib.lale import NoOp
+        from lale.lib.sklearn import PCA, LogisticRegression
+
+        sample = NoOp >> PCA >> LogisticRegression
+        result = Source(str(sample.visualize(ipython_display=False)))
+        for i in result:
+            if "URL" in i:
+                print(i)
+                self.assertTrue("target=_blank" in i)
+
     def test_invalid_input(self):
         from sklearn.linear_model import LogisticRegression as SklearnLR
 
@@ -47,8 +60,16 @@ class TestToGraphviz(unittest.TestCase):
 
 
 class TestPrettyPrint(unittest.TestCase):
+    # pylint:disable=reimported,redefined-outer-name
+
     def _roundtrip(self, expected, printed):
         self.maxDiff = None
+        # sklearn_version_family changes based on the Python as well as sklearn version,
+        # so remove that hyperparameter while comparing if present.
+        import re
+
+        expected = re.sub(r"""sklearn_version_family=.\d*.,""", "", expected)
+        printed = re.sub(r"""sklearn_version_family=.\d*.,""", "", printed)
         self.assertEqual(expected, printed)
         globals2 = {}
         locals2 = {}
@@ -105,7 +126,8 @@ pipeline = LogisticRegression()"""
         self._roundtrip(expected, lale.pretty_print.to_string(pipeline))
 
     def test_reducible(self):
-        from lale.lib.lale import ConcatFeatures, NoOp
+        from lale.lib.lale import NoOp
+        from lale.lib.rasl import ConcatFeatures
         from lale.lib.sklearn import (
             PCA,
             KNeighborsClassifier,
@@ -127,7 +149,7 @@ pipeline = LogisticRegression()"""
 from lale.lib.lale import NoOp
 from sklearn.decomposition import PCA
 from sklearn.kernel_approximation import Nystroem
-from lale.lib.lale import ConcatFeatures
+from lale.lib.rasl import ConcatFeatures
 from sklearn.neighbors import KNeighborsClassifier
 from sklearn.linear_model import LogisticRegression
 from xgboost import XGBClassifier as XGB
@@ -145,7 +167,8 @@ pipeline = (
         self._roundtrip(expected, lale.pretty_print.to_string(pipeline))
 
     def test_no_combinators(self):
-        from lale.lib.lale import ConcatFeatures, NoOp
+        from lale.lib.lale import NoOp
+        from lale.lib.rasl import ConcatFeatures
         from lale.lib.sklearn import (
             PCA,
             KNeighborsClassifier,
@@ -182,7 +205,7 @@ pipeline = make_pipeline(choice_0, union, choice_1)"""
         self._roundtrip(expected, printed)
 
     def test_astype_sklearn(self):
-        from lale.lib.lale import ConcatFeatures
+        from lale.lib.rasl import ConcatFeatures
         from lale.lib.sklearn import PCA, LogisticRegression, MinMaxScaler, Nystroem
 
         pca = PCA(copy=False)
@@ -219,8 +242,8 @@ pipeline = LR(solver="saga", C=0.9)"""
         self._roundtrip(expected, lale.pretty_print.to_string(pipeline))
 
     def test_import_as_2(self):
-        from lale.lib.lale import ConcatFeatures as Concat
         from lale.lib.lale import NoOp
+        from lale.lib.rasl import ConcatFeatures as Concat
         from lale.lib.sklearn import PCA
         from lale.lib.sklearn import KNeighborsClassifier as KNN
         from lale.lib.sklearn import LogisticRegression as LR
@@ -234,7 +257,7 @@ pipeline = LR(solver="saga", C=0.9)"""
 from lale.lib.lale import NoOp
 from sklearn.decomposition import PCA
 from sklearn.kernel_approximation import Nystroem
-from lale.lib.lale import ConcatFeatures as Concat
+from lale.lib.rasl import ConcatFeatures as Concat
 from sklearn.neighbors import KNeighborsClassifier as KNN
 from sklearn.linear_model import LogisticRegression as LR
 import lale
@@ -295,8 +318,8 @@ pipeline = Vote(
         self._roundtrip(expected, lale.pretty_print.to_string(pipeline))
 
     def test_multimodal(self):
-        from lale.lib.lale import ConcatFeatures as Cat
-        from lale.lib.lale import Project
+        from lale.lib.rasl import ConcatFeatures as Cat
+        from lale.lib.rasl import Project
         from lale.lib.sklearn import LinearSVC
         from lale.lib.sklearn import Normalizer as Norm
         from lale.lib.sklearn import OneHotEncoder as OneHot
@@ -307,10 +330,10 @@ pipeline = Vote(
         pipeline = (
             ((project_0 >> Norm()) & (project_1 >> OneHot())) >> Cat >> linear_svc
         )
-        expected = """from lale.lib.lale import Project
+        expected = """from lale.lib.rasl import Project
 from sklearn.preprocessing import Normalizer as Norm
 from sklearn.preprocessing import OneHotEncoder as OneHot
-from lale.lib.lale import ConcatFeatures as Cat
+from lale.lib.rasl import ConcatFeatures as Cat
 from sklearn.svm import LinearSVC
 import lale
 
@@ -363,7 +386,7 @@ pipeline = make_pipeline_graph(
         self._roundtrip(expected, lale.pretty_print.to_string(pipeline))
 
     def test_irreducible_2(self):
-        from lale.lib.lale import ConcatFeatures as HStack
+        from lale.lib.rasl import ConcatFeatures as HStack
         from lale.lib.sklearn import PCA
         from lale.lib.sklearn import KNeighborsClassifier as KNN
         from lale.lib.sklearn import LogisticRegression as LR
@@ -378,7 +401,7 @@ pipeline = make_pipeline_graph(
         expected = """from sklearn.decomposition import PCA
 from sklearn.preprocessing import MinMaxScaler as MMS
 from sklearn.neighbors import KNeighborsClassifier as KNN
-from lale.lib.lale import ConcatFeatures as HStack
+from lale.lib.rasl import ConcatFeatures as HStack
 from sklearn.linear_model import LogisticRegression as LR
 from lale.operators import make_pipeline_graph
 import lale
@@ -410,460 +433,19 @@ lr_1 = LR(C=0.19)
 pipeline = PCA >> (lr_0 | NoOp >> lr_1)"""
         self._roundtrip(expected, lale.pretty_print.to_string(pipeline))
 
-    def test_autoai_libs_cat_encoder(self):
-        import numpy as np
-        from autoai_libs.transformers.exportable import CatEncoder
-
-        from lale.lib.sklearn import LogisticRegression as LR
-
-        cat_encoder = CatEncoder(
-            encoding="ordinal",
-            categories="auto",
-            dtype=np.float64,
-            handle_unknown="error",
-        )
-        pipeline = cat_encoder >> LR()
-        expected = """from autoai_libs.transformers.exportable import CatEncoder
-import numpy as np
-from sklearn.linear_model import LogisticRegression as LR
-import lale
-
-lale.wrap_imported_operators()
-cat_encoder = CatEncoder(
-    encoding="ordinal",
-    categories="auto",
-    dtype=np.float64,
-    handle_unknown="error",
-    sklearn_version_family="23",
-)
-pipeline = cat_encoder >> LR()"""
-        self._roundtrip(expected, lale.pretty_print.to_string(pipeline))
-
-    def test_autoai_libs_fs1(self):
-        from autoai_libs.cognito.transforms.transform_utils import FS1
-
-        from lale.lib.sklearn import LogisticRegression as LR
-
-        fs1 = FS1(
-            cols_ids_must_keep=range(0, 7),
-            additional_col_count_to_keep=8,
-            ptype="classification",
-        )
-        pipeline = fs1 >> LR()
-        expected = """from autoai_libs.cognito.transforms.transform_utils import FS1
-from sklearn.linear_model import LogisticRegression as LR
-import lale
-
-lale.wrap_imported_operators()
-fs1 = FS1(
-    cols_ids_must_keep=range(0, 7),
-    additional_col_count_to_keep=8,
-    ptype="classification",
-)
-pipeline = fs1 >> LR()"""
-        self._roundtrip(expected, lale.pretty_print.to_string(pipeline))
-
-    def test_autoai_libs_numpy_replace_missing_values(self):
-        from autoai_libs.transformers.exportable import NumpyReplaceMissingValues
-
-        from lale.lib.sklearn import LogisticRegression as LR
-
-        numpy_replace_missing_values = NumpyReplaceMissingValues(
-            filling_values=float("nan"), missing_values=["?"]
-        )
-        pipeline = numpy_replace_missing_values >> LR()
-        expected = """from autoai_libs.transformers.exportable import NumpyReplaceMissingValues
-from sklearn.linear_model import LogisticRegression as LR
-import lale
-
-lale.wrap_imported_operators()
-numpy_replace_missing_values = NumpyReplaceMissingValues(
-    missing_values=["?"], filling_values=float("nan")
-)
-pipeline = numpy_replace_missing_values >> LR()"""
-        self._roundtrip(expected, lale.pretty_print.to_string(pipeline))
-
-    def test_autoai_libs_numpy_replace_unknown_values1(self):
-        from autoai_libs.transformers.exportable import NumpyReplaceUnknownValues
-
-        from lale.lib.sklearn import LogisticRegression as LR
-
-        numpy_replace_unknown_values = NumpyReplaceUnknownValues(
-            filling_values=float("nan"),
-            filling_values_list=[float("nan")],
-            known_values_list=[[36, 45, 56, 67, 68, 75, 78, 89]],
-            missing_values_reference_list=["", "-", "?", float("nan")],
-        )
-        pipeline = numpy_replace_unknown_values >> LR()
-        expected = """from autoai_libs.transformers.exportable import NumpyReplaceUnknownValues
-from sklearn.linear_model import LogisticRegression as LR
-import lale
-
-lale.wrap_imported_operators()
-numpy_replace_unknown_values = NumpyReplaceUnknownValues(
-    filling_values=float("nan"),
-    filling_values_list=[float("nan")],
-    missing_values_reference_list=["", "-", "?", float("nan")],
-)
-pipeline = numpy_replace_unknown_values >> LR()"""
-        self._roundtrip(expected, lale.pretty_print.to_string(pipeline))
-
-    def test_autoai_libs_numpy_replace_unknown_values2(self):
-        from lale.lib.autoai_libs import NumpyReplaceUnknownValues
-        from lale.lib.sklearn import LogisticRegression as LR
-
-        CustomOp = NumpyReplaceUnknownValues.customize_schema(
-            known_values_list={
-                "anyOf": [
-                    {"type": "array", "items": {"laleType": "Any"}},
-                    {"enum": [None]},
-                ],
-                "default": None,
-            }
-        )
-        numpy_replace_unknown_values = CustomOp(
-            filling_values=float("nan"),
-            filling_values_list=[float("nan")],
-            known_values_list=[[36, 45, 56, 67, 68, 75, 78, 89]],
-            missing_values_reference_list=["", "-", "?", float("nan")],
-        )
-        pipeline = numpy_replace_unknown_values >> LR()
-        expected = """from autoai_libs.transformers.exportable import (
-    NumpyReplaceUnknownValues as CustomOp,
-)
-from sklearn.linear_model import LogisticRegression as LR
-import lale
-
-lale.wrap_imported_operators()
-custom_op = CustomOp(
-    filling_values=float("nan"),
-    filling_values_list=[float("nan")],
-    known_values_list=[[36, 45, 56, 67, 68, 75, 78, 89]],
-    missing_values_reference_list=["", "-", "?", float("nan")],
-)
-pipeline = custom_op >> LR()"""
-        self._roundtrip(expected, lale.pretty_print.to_string(pipeline))
-
-    def test_autoai_libs_tam_1(self):
-        import autoai_libs.cognito.transforms.transform_extras
-        import numpy as np
-        from autoai_libs.cognito.transforms.transform_utils import TAM
-
-        from lale.lib.sklearn import LogisticRegression as LR
-
-        tam = TAM(
-            tans_class=autoai_libs.cognito.transforms.transform_extras.IsolationForestAnomaly,
-            name="isoforestanomaly",
-            col_names=["a", "b", "c"],
-            col_dtypes=[np.dtype("float32"), np.dtype("float32"), np.dtype("float32")],
-        )
-        pipeline = tam >> LR()
-        expected = """from autoai_libs.cognito.transforms.transform_utils import TAM
-import autoai_libs.cognito.transforms.transform_extras
-import numpy as np
-from sklearn.linear_model import LogisticRegression as LR
-from sklearn.pipeline import make_pipeline
-
-tam = TAM(
-    tans_class=autoai_libs.cognito.transforms.transform_extras.IsolationForestAnomaly,
-    name="isoforestanomaly",
-    col_names=["a", "b", "c"],
-    col_dtypes=[
-        np.dtype("float32"), np.dtype("float32"), np.dtype("float32"),
-    ],
-)
-pipeline = make_pipeline(tam, LR())"""
-        self._roundtrip(
-            expected, lale.pretty_print.to_string(pipeline, astype="sklearn")
-        )
-
-    def test_autoai_libs_tam_2(self):
-        import numpy as np
-        from lightgbm import LGBMClassifier
-        from sklearn.decomposition import PCA
-
-        from lale.lib.autoai_libs import TAM
-        from lale.operators import make_pipeline
-
-        pca = PCA(copy=False)
-        tam = TAM(
-            tans_class=pca,
-            name="pca",
-            col_names=["a", "b", "c"],
-            col_dtypes=[np.dtype("float32"), np.dtype("float32"), np.dtype("float32")],
-        )
-        lgbm_classifier = LGBMClassifier(class_weight="balanced", learning_rate=0.18)
-        pipeline = make_pipeline(tam, lgbm_classifier)
-        expected = """from autoai_libs.cognito.transforms.transform_utils import TAM
-import sklearn.decomposition
-import numpy as np
-from lightgbm import LGBMClassifier
-from lale.operators import make_pipeline
-
-tam = TAM(
-    tans_class=sklearn.decomposition.PCA(copy=False),
-    name="pca",
-    col_names=["a", "b", "c"],
-    col_dtypes=[
-        np.dtype("float32"), np.dtype("float32"), np.dtype("float32"),
-    ],
-)
-lgbm_classifier = LGBMClassifier(
-    class_weight="balanced", learning_rate=0.18, n_estimators=100
-)
-pipeline = make_pipeline(tam, lgbm_classifier)"""
-        self._roundtrip(
-            expected, lale.pretty_print.to_string(pipeline, combinators=False)
-        )
-
-    def test_autoai_libs_tam_3(self):
-        import autoai_libs.cognito.transforms.transform_utils
-        import numpy as np
-        import sklearn.cluster
-        import sklearn.linear_model
-        import sklearn.pipeline
-
-        import lale.helpers
-        import lale.operators
-        import lale.pretty_print
-
-        sklearn_pipeline = sklearn.pipeline.make_pipeline(
-            autoai_libs.cognito.transforms.transform_utils.TAM(
-                tans_class=sklearn.cluster.FeatureAgglomeration(
-                    affinity="euclidean",
-                    compute_full_tree="auto",
-                    connectivity=None,
-                    linkage="ward",
-                    memory=None,
-                    n_clusters=2,
-                    pooling_func=np.mean,
-                ),
-                name="featureagglomeration",
-                col_names=["a", "b", "c"],
-                col_dtypes=[
-                    np.dtype("float32"),
-                    np.dtype("float32"),
-                    np.dtype("float32"),
-                ],
-            ),
-            sklearn.linear_model.LogisticRegression(
-                solver="liblinear", multi_class="ovr"
-            ),
-        )
-        pipeline = lale.helpers.import_from_sklearn_pipeline(sklearn_pipeline)
-        expected = """from autoai_libs.cognito.transforms.transform_utils import TAM
-from sklearn.cluster import FeatureAgglomeration
-import numpy as np
-from sklearn.linear_model import LogisticRegression
-import lale
-
-lale.wrap_imported_operators()
-tam = TAM(
-    tans_class=FeatureAgglomeration(),
-    name="featureagglomeration",
-    col_names=["a", "b", "c"],
-    col_dtypes=[
-        np.dtype("float32"), np.dtype("float32"), np.dtype("float32"),
-    ],
-)
-logistic_regression = LogisticRegression(
-    multi_class="ovr", solver="liblinear"
-)
-pipeline = tam >> logistic_regression"""
-        self._roundtrip(expected, lale.pretty_print.to_string(pipeline))
-
-    def test_autoai_libs_tam_4(self):
-        import autoai_libs.cognito.transforms.transform_utils
-        import numpy as np
-        import sklearn.decomposition
-        import sklearn.linear_model
-        import sklearn.pipeline
-
-        import lale.helpers
-        import lale.operators
-        import lale.pretty_print
-
-        sklearn_pipeline = sklearn.pipeline.make_pipeline(
-            autoai_libs.cognito.transforms.transform_utils.TAM(
-                tans_class=sklearn.decomposition.PCA(),
-                name="pca",
-                col_names=["a", "b", "c"],
-                col_dtypes=[
-                    np.dtype("float32"),
-                    np.dtype("float32"),
-                    np.dtype("float32"),
-                ],
-            ),
-            sklearn.linear_model.LogisticRegression(
-                solver="liblinear", multi_class="ovr"
-            ),
-        )
-        pipeline = lale.helpers.import_from_sklearn_pipeline(
-            sklearn_pipeline, fitted=False
-        )
-        assert isinstance(pipeline, lale.operators.TrainableOperator)
-
-        expected = """from autoai_libs.cognito.transforms.transform_utils import TAM
-from sklearn.decomposition import PCA
-import numpy as np
-from sklearn.linear_model import LogisticRegression
-import lale
-
-lale.wrap_imported_operators()
-tam = TAM(
-    tans_class=PCA(),
-    name="pca",
-    col_names=["a", "b", "c"],
-    col_dtypes=[
-        np.dtype("float32"), np.dtype("float32"), np.dtype("float32"),
-    ],
-)
-logistic_regression = LogisticRegression(
-    multi_class="ovr", solver="liblinear"
-)
-pipeline = tam >> logistic_regression"""
-        self._roundtrip(expected, lale.pretty_print.to_string(pipeline))
-        import numpy as np
-        import pandas as pd
-
-        test = pd.DataFrame(
-            np.random.randint(0, 100, size=(15, 3)),
-            columns=["a", "b", "c"],
-            dtype=np.dtype("float32"),
-        )
-        trained = pipeline.fit(
-            test.to_numpy(), [0, 1, 1, 0, 0, 0, 1, 1, 1, 1, 0, 0, 1, 0, 1]
-        )
-        trained.predict(test.to_numpy())
-
-    def test_autoai_libs_ta1(self):
-        import autoai_libs.utils.fc_methods
-        import numpy as np
-        from autoai_libs.cognito.transforms.transform_utils import TA1
-
-        from lale.lib.sklearn import LogisticRegression as LR
-
-        ta1 = TA1(
-            fun=np.rint,
-            name="round",
-            datatypes=["numeric"],
-            feat_constraints=[autoai_libs.utils.fc_methods.is_not_categorical],
-            col_names=[
-                "a____________",
-                "b____________",
-                "c____________",
-                "d____________",
-                "e____________",
-            ],
-            col_dtypes=[
-                np.dtype("float32"),
-                np.dtype("float32"),
-                np.dtype("float32"),
-                np.dtype("float32"),
-                np.dtype("float32"),
-            ],
-        )
-        pipeline = ta1 >> LR()
-        expected = """from autoai_libs.cognito.transforms.transform_utils import TA1
-import numpy as np
-import autoai_libs.utils.fc_methods
-from sklearn.linear_model import LogisticRegression as LR
-import lale
-
-lale.wrap_imported_operators()
-ta1 = TA1(
-    fun=np.rint,
-    name="round",
-    datatypes=["numeric"],
-    feat_constraints=[autoai_libs.utils.fc_methods.is_not_categorical],
-    col_names=[
-        "a____________", "b____________", "c____________", "d____________",
-        "e____________",
-    ],
-    col_dtypes=[
-        np.dtype("float32"), np.dtype("float32"), np.dtype("float32"),
-        np.dtype("float32"), np.dtype("float32"),
-    ],
-)
-pipeline = ta1 >> LR()"""
-        self._roundtrip(expected, lale.pretty_print.to_string(pipeline))
-
-    def test_autoai_libs_t_no_op(self):
-        from lightgbm import LGBMClassifier
-
-        from lale.lib.autoai_libs import TNoOp
-        from lale.operators import make_pipeline
-
-        t_no_op = TNoOp(
-            fun="fun",
-            name="no_action",
-            datatypes="x",
-            feat_constraints=[],
-            tgraph="tgraph",
-        )
-        lgbm_classifier = LGBMClassifier(class_weight="balanced", learning_rate=0.18)
-        pipeline = make_pipeline(t_no_op, lgbm_classifier)
-        expected = """from autoai_libs.cognito.transforms.transform_utils import TNoOp
-from lightgbm import LGBMClassifier
-from lale.operators import make_pipeline
-
-t_no_op = TNoOp(
-    fun="fun",
-    name="no_action",
-    datatypes="x",
-    feat_constraints=[],
-    tgraph="tgraph",
-)
-lgbm_classifier = LGBMClassifier(
-    class_weight="balanced", learning_rate=0.18, n_estimators=100
-)
-pipeline = make_pipeline(t_no_op, lgbm_classifier)"""
-        self._roundtrip(
-            expected, lale.pretty_print.to_string(pipeline, combinators=False)
-        )
-
-    def test_autoai_libs_two_ops_with_combinator(self):
-        from autoai_libs.transformers.exportable import (
-            CompressStrings,
-            NumpyColumnSelector,
-        )
-
-        numpy_column_selector = NumpyColumnSelector(columns=[0, 2, 3, 5])
-        compress_strings = CompressStrings(
-            compress_type="hash",
-            dtypes_list=["char_str", "char_str", "char_str", "char_str"],
-            misslist_list=[[], [], [], []],
-        )
-        pipeline = lale.operators.make_pipeline(numpy_column_selector, compress_strings)
-        expected = """from autoai_libs.transformers.exportable import NumpyColumnSelector
-from autoai_libs.transformers.exportable import CompressStrings
-import lale
-
-lale.wrap_imported_operators()
-numpy_column_selector = NumpyColumnSelector(columns=[0, 2, 3, 5])
-compress_strings = CompressStrings(
-    compress_type="hash",
-    dtypes_list=["char_str", "char_str", "char_str", "char_str"],
-    missing_values_reference_list=["?", "", "-", float("nan")],
-    misslist_list=[[], [], [], []],
-)
-pipeline = numpy_column_selector >> compress_strings"""
-        printed = lale.pretty_print.to_string(pipeline, combinators=True)
-        self._roundtrip(expected, printed)
-
     def test_expression(self):
         from lale.expressions import it, mean
-        from lale.lib.lale import Aggregate, Join, Scan
+        from lale.lib.rasl import Aggregate, Join, Scan
 
         scan1 = Scan(table=it["table1.csv"])
         scan2 = Scan(table=it["table2.csv"])
         join = Join(pred=[it["table1.csv"].k1 == it["table2.csv"].k2])
         aggregate = Aggregate(columns={"talk_time|mean": mean(it.talk_time)})
         pipeline = (scan1 & scan2) >> join >> aggregate
-        expected = """from lale.lib.lale import Scan
+        expected = """from lale.lib.rasl import Scan
 from lale.expressions import it
-from lale.lib.lale import Join
-from lale.lib.lale import Aggregate
+from lale.lib.rasl import Join
+from lale.lib.rasl import Aggregate
 from lale.expressions import mean
 import lale
 
@@ -902,7 +484,7 @@ pipeline = Pipeline(steps=[("pca", PCA), ("lr", logistic_regression)])"""
         printed = lale.pretty_print.to_string(pipeline, astype="sklearn")
         self._roundtrip(expected, printed)
 
-    def test_customize_schema(self):
+    def test_customize_schema_enum_and_number(self):
         from lale.lib.sklearn import LogisticRegression
 
         pipeline = LogisticRegression.customize_schema(
@@ -928,6 +510,64 @@ pipeline = LogisticRegression.customize_schema(
     },
 )(solver="lbfgs")"""
         self._roundtrip(expected, pipeline.pretty_print(customize_schema=True))
+
+    def test_customize_schema_none_and_boolean(self):
+        from lale.lib.sklearn import RandomForestRegressor
+
+        pipeline = RandomForestRegressor.customize_schema(
+            bootstrap={"type": "boolean", "default": True},
+            random_state={
+                "anyOf": [
+                    {"laleType": "numpy.random.RandomState"},
+                    {
+                        "description": "RandomState used by np.random",
+                        "enum": [None],
+                    },
+                    {"description": "Explicit seed.", "type": "integer"},
+                ],
+                "default": 33,
+            },
+        )(n_estimators=50)
+        expected = """from sklearn.ensemble import RandomForestRegressor
+import lale
+
+lale.wrap_imported_operators()
+pipeline = RandomForestRegressor.customize_schema(
+    bootstrap={"type": "boolean", "default": True},
+    random_state={
+        "anyOf": [
+            {"laleType": "numpy.random.RandomState"},
+            {"description": "RandomState used by np.random", "enum": [None]},
+            {"description": "Explicit seed.", "type": "integer"},
+        ],
+        "default": 33,
+    },
+)(n_estimators=50)"""
+        # this should not include "random_state=33" because that would be
+        # redundant with the schema, and would prevent automated search
+        self._roundtrip(expected, pipeline.pretty_print(customize_schema=True))
+
+    def test_customize_schema_print_defaults(self):
+        from lale.lib.sklearn import RandomForestRegressor
+
+        pipeline = RandomForestRegressor.customize_schema(
+            bootstrap={"type": "boolean", "default": True},  # default unchanged
+            random_state={
+                "anyOf": [
+                    {"laleType": "numpy.random.RandomState"},
+                    {"enum": [None]},
+                    {"type": "integer"},
+                ],
+                "default": 33,  # default changed
+            },
+        )(n_estimators=50)
+        expected = """from sklearn.ensemble import RandomForestRegressor
+import lale
+
+lale.wrap_imported_operators()
+pipeline = RandomForestRegressor(n_estimators=50, random_state=33)"""
+        # print exactly those defaults that changed
+        self._roundtrip(expected, pipeline.pretty_print(customize_schema=False))
 
     def test_user_operator_in_toplevel_module(self):
         import importlib
@@ -966,11 +606,89 @@ MockClassifier = lale.operators.make_operator(_MockClassifierImpl)
                 expected = f"""from {module_name} import MockClassifier as MockClf
 import lale
 
-lale.wrap_imported_operators()
+lale.wrap_imported_operators(["{module_name}"])
 pipeline = MockClf(int_hp=42)"""
                 self._roundtrip(expected, pipeline.pretty_print())
             finally:
                 sys.path = old_pythonpath
+
+    def test_nonlib_operator(self):
+        from test.mock_custom_operators import CustomOrigOperator
+
+        from lale.lib.sklearn import LogisticRegression
+
+        pipeline = CustomOrigOperator() >> LogisticRegression()
+        expected = """from test.mock_module import CustomOrigOperator
+from sklearn.linear_model import LogisticRegression
+import lale
+
+lale.wrap_imported_operators(["test.mock_module"])
+pipeline = CustomOrigOperator() >> LogisticRegression()"""
+        self._roundtrip(expected, pipeline.pretty_print())
+
+    @unittest.skip("TODO: avoid spurious 'name' keys in printed dictionaries")
+    def test_fairness_info(self):
+        from lale.lib.aif360 import DisparateImpactRemover, fetch_creditg_df
+        from lale.lib.lale import Hyperopt, Project
+        from lale.lib.sklearn import KNeighborsClassifier
+
+        X, y, fairness_info = fetch_creditg_df()
+        disparate_impact_remover = DisparateImpactRemover(
+            **fairness_info,
+            preparation=Project(columns={"type": "number"}),
+        )
+        planned = disparate_impact_remover >> KNeighborsClassifier()
+        frozen = planned.freeze_trainable()
+        pipeline = frozen.auto_configure(X, y, optimizer=Hyperopt, cv=2, max_evals=1)
+        expected = """from aif360.algorithms.preprocessing import DisparateImpactRemover
+from lale.lib.rasl import Project
+from sklearn.neighbors import KNeighborsClassifier
+import lale
+
+lale.wrap_imported_operators()
+project = Project(columns={"type": "number"})
+disparate_impact_remover = DisparateImpactRemover(
+    favorable_labels=["good"],
+    protected_attributes=[
+        {
+            "reference_group": [
+                "male div/sep", "male mar/wid", "male single",
+            ],
+            "feature": "personal_status",
+        },
+        {
+            "reference_group": [[26, 1000]],
+            "feature": "age",
+        },
+    ],
+    preparation=project,
+)
+pipeline = disparate_impact_remover >> KNeighborsClassifier()"""
+        self._roundtrip(expected, pipeline.pretty_print())
+
+    def test_snap_logistic_regression_1(self):
+        # force printing arguments via "transient": "alwaysPrint", case True
+        from lale.lib.snapml import SnapLogisticRegression
+
+        pipeline = SnapLogisticRegression(normalize=True)
+        expected = """from snapml import SnapLogisticRegression
+import lale
+
+lale.wrap_imported_operators()
+pipeline = SnapLogisticRegression(fit_intercept=True, normalize=True)"""
+        self._roundtrip(expected, lale.pretty_print.to_string(pipeline))
+
+    def test_snap_logistic_regression_2(self):
+        # force printing arguments via "transient": "alwaysPrint", case False
+        from lale.lib.snapml import SnapLogisticRegression
+
+        pipeline = SnapLogisticRegression(normalize=False)
+        expected = """from snapml import SnapLogisticRegression
+import lale
+
+lale.wrap_imported_operators()
+pipeline = SnapLogisticRegression(normalize=False, fit_intercept=True)"""
+        self._roundtrip(expected, lale.pretty_print.to_string(pipeline))
 
 
 class TestToAndFromJSON(unittest.TestCase):
@@ -1032,7 +750,8 @@ class TestToAndFromJSON(unittest.TestCase):
     def test_pipeline_1(self):
         self.maxDiff = None
         from lale.json_operator import from_json, to_json
-        from lale.lib.lale import ConcatFeatures, NoOp
+        from lale.lib.lale import NoOp
+        from lale.lib.rasl import ConcatFeatures
         from lale.lib.sklearn import PCA
         from lale.lib.sklearn import LogisticRegression as LR
 
@@ -1069,7 +788,7 @@ class TestToAndFromJSON(unittest.TestCase):
                     "state": "trained",
                     "operator": "ConcatFeatures",
                     "label": "ConcatFeatures",
-                    "documentation_url": "https://lale.readthedocs.io/en/latest/modules/lale.lib.lale.concat_features.html",
+                    "documentation_url": "https://lale.readthedocs.io/en/latest/modules/lale.lib.rasl.concat_features.html",
                     "hyperparams": None,
                     "coefs": None,
                     "is_frozen_trainable": True,
@@ -1311,15 +1030,18 @@ class TestToAndFromJSON(unittest.TestCase):
                     "hyperparams": {
                         "allOf": [
                             {
-                                "solver": {
-                                    "default": "liblinear",
-                                    "enum": ["lbfgs", "liblinear"],
-                                },
-                                "tol": {
-                                    "type": "number",
-                                    "minimum": 0.00001,
-                                    "maximum": 0.1,
-                                    "default": 0.0001,
+                                "type": "object",
+                                "properties": {
+                                    "solver": {
+                                        "default": "liblinear",
+                                        "enum": ["lbfgs", "liblinear"],
+                                    },
+                                    "tol": {
+                                        "type": "number",
+                                        "minimum": 0.00001,
+                                        "maximum": 0.1,
+                                        "default": 0.0001,
+                                    },
                                 },
                             }
                         ]

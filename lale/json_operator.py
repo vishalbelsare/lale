@@ -1,4 +1,4 @@
-# Copyright 2019 IBM Corporation
+# Copyright 2019-2023 IBM Corporation
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -22,6 +22,7 @@ from typing import Any, Dict, Tuple, cast
 import jsonschema
 
 import lale.operators
+from lale.helpers import GenSym
 
 logger = logging.getLogger(__name__)
 
@@ -228,9 +229,7 @@ def _get_state(op: "lale.operators.Operator") -> str:
         return "trained"
     if isinstance(op, lale.operators.TrainableOperator):
         return "trainable"
-    if isinstance(op, lale.operators.PlannedOperator) or isinstance(
-        op, lale.operators.OperatorChoice
-    ):
+    if isinstance(op, (lale.operators.PlannedOperator, lale.operators.OperatorChoice)):
         return "planned"
     if isinstance(op, lale.operators.Operator):
         return "metamodel"
@@ -272,63 +271,63 @@ def _camelCase_to_snake(name):
     return re.sub("([a-z0-9])([A-Z])", r"\1_\2", s1).lower()
 
 
-class _GenSym:
-    def __init__(self, op: "lale.operators.Operator", cls2label: Dict[str, str]):
-        label2count: Dict[str, int] = {}
+def _init_gensym(op: "lale.operators.Operator", cls2label: Dict[str, str]) -> GenSym:
+    label2count: Dict[str, int] = {}
 
-        def populate_label2count(op: "lale.operators.Operator"):
-            if isinstance(op, lale.operators.IndividualOp):
-                label = cls2label.get(op.class_name(), op.name())
-            elif isinstance(op, lale.operators.BasePipeline):
-                for s in op.steps():
-                    populate_label2count(s)
-                label = "pipeline"
-            elif isinstance(op, lale.operators.OperatorChoice):
-                for s in op.steps():
-                    populate_label2count(s)
-                label = "choice"
-            else:
-                raise ValueError(f"Unexpected argument of type: {type(op)}")
-            label2count[label] = label2count.get(label, 0) + 1
-
-        populate_label2count(op)
-        non_unique_labels = {ll for ll, c in label2count.items() if c > 1}
-        snakes = {_camelCase_to_snake(ll) for ll in non_unique_labels}
-        self._names = (
-            {"lale", "make_pipeline", "make_union", "make_choice"}
-            | set(keyword.kwlist)
-            | non_unique_labels
-            | snakes
-        )
-
-    def __call__(self, prefix: str) -> str:
-        if prefix in self._names:
-            suffix = 0
-            while f"{prefix}_{suffix}" in self._names:
-                suffix += 1
-            result = f"{prefix}_{suffix}"
+    def populate_label2count(op: "lale.operators.Operator"):
+        if isinstance(op, lale.operators.IndividualOp):
+            label = cls2label.get(op.class_name(), op.name())
+        elif isinstance(op, lale.operators.BasePipeline):
+            for s in op.steps_list():
+                populate_label2count(s)
+            label = "pipeline"
+        elif isinstance(op, lale.operators.OperatorChoice):
+            for s in op.steps_list():
+                populate_label2count(s)
+            label = "choice"
         else:
-            result = prefix
-        self._names |= {result}
-        return result
+            raise ValueError(f"Unexpected argument of type: {type(op)}")
+        label2count[label] = label2count.get(label, 0) + 1
+
+    populate_label2count(op)
+    non_unique_labels = {ll for ll, c in label2count.items() if c > 1}
+    snakes = {_camelCase_to_snake(ll) for ll in non_unique_labels}
+    return GenSym(
+        {"lale", "make_pipeline", "make_union", "make_choice"}
+        | set(keyword.kwlist)
+        | non_unique_labels
+        | snakes
+    )
 
 
-def _hps_to_json_rec(hps, cls2label: Dict[str, str], gensym: _GenSym, steps) -> Any:
+def _hps_to_json_rec(
+    hps,
+    cls2label: Dict[str, str],
+    gensym: GenSym,
+    steps,
+    add_custom_default: bool,
+) -> Any:
     if isinstance(hps, lale.operators.Operator):
-        step_uid, step_jsn = _op_to_json_rec(hps, cls2label, gensym)
+        step_uid, step_jsn = _op_to_json_rec(hps, cls2label, gensym, add_custom_default)
         steps[step_uid] = step_jsn
         return {"$ref": f"../steps/{step_uid}"}
     elif isinstance(hps, dict):
         return {
-            hp_name: _hps_to_json_rec(hp_val, cls2label, gensym, steps)
+            hp_name: _hps_to_json_rec(
+                hp_val, cls2label, gensym, steps, add_custom_default
+            )
             for hp_name, hp_val in hps.items()
         }
     elif isinstance(hps, tuple):
         return tuple(
-            [_hps_to_json_rec(hp_val, cls2label, gensym, steps) for hp_val in hps]
+            _hps_to_json_rec(hp_val, cls2label, gensym, steps, add_custom_default)
+            for hp_val in hps
         )
     elif isinstance(hps, list):
-        return [_hps_to_json_rec(hp_val, cls2label, gensym, steps) for hp_val in hps]
+        return [
+            _hps_to_json_rec(hp_val, cls2label, gensym, steps, add_custom_default)
+            for hp_val in hps
+        ]
     else:
         return hps
 
@@ -351,8 +350,8 @@ def _get_customize_schema(after, before):
     def list_equal_modulo(l1, l2, mod):
         if len(l1) != len(l2):
             return False
-        for i in range(len(l1)):
-            if i != mod and l1[i] != l2[i]:
+        for i, (v1, v2) in enumerate(zip(l1, l2)):
+            if i != mod and v1 != v2:
                 return False
         return True
 
@@ -378,12 +377,37 @@ def _get_customize_schema(after, before):
         for hp_name, hp_schema in after.items()
         if hp_name not in before or hp_schema != before[hp_name]
     }
-    result = {"properties": {"hyperparams": {"allOf": [hp_diff]}}}
+    result = {
+        "properties": {
+            "hyperparams": {"allOf": [{"type": "object", "properties": hp_diff}]}
+        }
+    }
     return result
 
 
+def _top_schemas_to_hparams(top_level_schemas) -> JSON_TYPE:
+    if not isinstance(top_level_schemas, dict):
+        return {}
+    return top_level_schemas.get("properties", {}).get("hyperparams", {})
+
+
+def _hparams_schemas_to_props(hparams_schemas) -> JSON_TYPE:
+    if not isinstance(hparams_schemas, dict):
+        return {}
+    return hparams_schemas.get("allOf", [{}])[0].get("properties", {})
+
+
+def _top_schemas_to_hp_props(top_level_schemas) -> JSON_TYPE:
+    hparams = _top_schemas_to_hparams(top_level_schemas)
+    props = _hparams_schemas_to_props(hparams)
+    return props
+
+
 def _op_to_json_rec(
-    op: "lale.operators.Operator", cls2label: Dict[str, str], gensym: _GenSym
+    op: "lale.operators.Operator",
+    cls2label: Dict[str, str],
+    gensym: GenSym,
+    add_custom_default: bool,
 ) -> Tuple[str, JSON_TYPE]:
     jsn: JSON_TYPE = {}
     jsn["class"] = op.class_name()
@@ -400,19 +424,21 @@ def _op_to_json_rec(
                 jsn["viz_label"] = op._impl.viz_label()
             hyperparams = op.reduced_hyperparams()
             if hyperparams is None:
-                jsn["hyperparams"] = None
+                jsn["hyperparams"] = {} if hasattr(op._impl, "fit") else None
             else:
-                hp_schema = (
-                    op.hyperparam_schema().get("allOf", [{}])[0].get("properties", {})
-                )
+                hp_schema = _hparams_schemas_to_props(op.hyperparam_schema())
                 hyperparams = {
                     k: v
                     for k, v in hyperparams.items()
-                    if not hp_schema.get(k, {}).get("transient", False)
+                    if hp_schema.get(k, {}).get("transient", False) is not True
                 }
+                for k, s in hp_schema.items():
+                    if s.get("transient", False) == "alwaysPrint":
+                        if k not in hyperparams and "default" in s:
+                            hyperparams[k] = s["default"]
                 steps: Dict[str, JSON_TYPE] = {}
                 jsn["hyperparams"] = _hps_to_json_rec(
-                    hyperparams, cls2label, gensym, steps
+                    hyperparams, cls2label, gensym, steps, add_custom_default
                 )
                 if len(steps) > 0:
                     jsn["steps"] = steps
@@ -426,35 +452,60 @@ def _op_to_json_rec(
         orig_schemas = lale.operators.get_lib_schemas(op.impl_class)
         if op._schemas is not orig_schemas:
             jsn["customize_schema"] = _get_customize_schema(op._schemas, orig_schemas)
+            if add_custom_default and isinstance(
+                jsn.get("customize_schema", None), dict
+            ):
+                if isinstance(jsn.get("hyperparams", None), dict):
+                    assert jsn["hyperparams"] is not None  # to help pyright
+                    orig = _top_schemas_to_hp_props(orig_schemas)
+                    cust = _top_schemas_to_hp_props(jsn["customize_schema"])
+                    for hp_name, hp_schema in cust.items():
+                        if "default" in hp_schema:
+                            if hp_name not in jsn["hyperparams"]:
+                                cust_default = hp_schema["default"]
+                                if hp_name in orig and "default" in orig[hp_name]:
+                                    orig_default = orig[hp_name]["default"]
+                                    if cust_default != orig_default:
+                                        jsn["hyperparams"][hp_name] = cust_default
+                                else:
+                                    jsn["hyperparams"][hp_name] = cust_default
     elif isinstance(op, lale.operators.BasePipeline):
         uid = gensym("pipeline")
         child2uid: Dict[lale.operators.Operator, str] = {}
         child2jsn: Dict[lale.operators.Operator, JSON_TYPE] = {}
-        for idx, child in enumerate(op.steps()):
-            child_uid, child_jsn = _op_to_json_rec(child, cls2label, gensym)
+        for child in op.steps_list():
+            child_uid, child_jsn = _op_to_json_rec(
+                child, cls2label, gensym, add_custom_default
+            )
             child2uid[child] = child_uid
             child2jsn[child] = child_jsn
         jsn["edges"] = [[child2uid[x], child2uid[y]] for x, y in op.edges()]
-        jsn["steps"] = {child2uid[z]: child2jsn[z] for z in op.steps()}
+        jsn["steps"] = {child2uid[z]: child2jsn[z] for z in op.steps_list()}
     elif isinstance(op, lale.operators.OperatorChoice):
         jsn["operator"] = "OperatorChoice"
         uid = gensym("choice")
         jsn["state"] = "planned"
         jsn["steps"] = {}
-        for step in op.steps():
-            child_uid, child_jsn = _op_to_json_rec(step, cls2label, gensym)
+        for step in op.steps_list():
+            child_uid, child_jsn = _op_to_json_rec(
+                step, cls2label, gensym, add_custom_default
+            )
             jsn["steps"][child_uid] = child_jsn
     else:
         raise ValueError(f"Unexpected argument of type: {type(op)}")
     return uid, jsn
 
 
-def to_json(op: "lale.operators.Operator", call_depth: int = 1) -> JSON_TYPE:
+def to_json(
+    op: "lale.operators.Operator",
+    call_depth: int = 1,
+    add_custom_default: bool = False,
+) -> JSON_TYPE:
     from lale.settings import disable_hyperparams_schema_validation
 
     cls2label = _get_cls2label(call_depth + 1)
-    gensym = _GenSym(op, cls2label)
-    uid, jsn = _op_to_json_rec(op, cls2label, gensym)
+    gensym = _init_gensym(op, cls2label)
+    _uid, jsn = _op_to_json_rec(op, cls2label, gensym, add_custom_default)
     if not disable_hyperparams_schema_validation:
         jsonschema.validate(jsn, SCHEMA, jsonschema.Draft4Validator)
     return jsn
@@ -469,7 +520,7 @@ def _hps_from_json_rec(jsn: Any, steps: JSON_TYPE) -> Any:
         else:
             return {k: _hps_from_json_rec(v, steps) for k, v in jsn.items()}
     elif isinstance(jsn, tuple):
-        return tuple([_hps_from_json_rec(v, steps) for v in jsn])
+        return tuple(_hps_from_json_rec(v, steps) for v in jsn)
     elif isinstance(jsn, list):
         return [_hps_from_json_rec(v, steps) for v in jsn]
     else:
@@ -497,7 +548,7 @@ def _op_from_json_rec(jsn: JSON_TYPE) -> "lale.operators.Operator":
         name = jsn["operator"]
         result = lale.operators.make_operator(impl, schemas, name)
         if jsn.get("customize_schema", {}) != {}:
-            new_hps = jsn["customize_schema"]["properties"]["hyperparams"]["allOf"][0]
+            new_hps = _top_schemas_to_hp_props(jsn["customize_schema"])
             result = result.customize_schema(**new_hps)
         if jsn["state"] in ["trainable", "trained"]:
             if _get_state(result) == "planned":
@@ -524,7 +575,8 @@ def _op_from_json_rec(jsn: JSON_TYPE) -> "lale.operators.Operator":
             or jsn["state"] == "trained"
             and jsn["coefs"] == "coefs_not_available"
         )
-        assert result.documentation_url() == jsn["documentation_url"]
+        if "documentation_url" in jsn:
+            assert result.documentation_url() == jsn["documentation_url"]
         return result
     assert False, f"unexpected JSON {jsn}"
 

@@ -12,11 +12,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import sklearn
+from packaging import version
 from sklearn.cluster import KMeans as SKLModel
 
 from lale.docstrings import set_docstrings
-from lale.operators import make_operator
+from lale.operators import make_operator, sklearn_version
 
 _hyperparams_schema = {
     "$schema": "http://json-schema.org/draft-04/schema#",
@@ -110,7 +110,6 @@ The final results will be the best output of n_init consecutive runs in terms of
                     "type": "number",
                     "minimumForOptimizer": 1e-08,
                     "maximumForOptimizer": 0.01,
-                    "distribution": "loguniform",
                     "default": 0.0001,
                     "description": "Relative tolerance with regards to Frobenius norm of the difference in the cluster centers of two consecutive iterations to declare convergence.",
                 },
@@ -180,6 +179,20 @@ _input_fit_schema = {
         },
     },
 }
+
+if sklearn_version >= version.Version("1.3"):
+    _input_fit_schema["properties"]["sample_weight"] = {  # type:ignore
+        "anyOf": [
+            {"type": "array", "items": {"type": "number"}},
+            {"enum": [None, "deprecated"]},
+        ],
+        "default": "deprecated",
+        "description": "The parameter `sample_weight` is deprecated in version 1.3 and will be removed in 1.5.",
+    }
+
+if sklearn_version >= version.Version("1.5"):
+    del _input_fit_schema["properties"]["sample_weight"]  # type:ignore
+
 _input_transform_schema = {
     "$schema": "http://json-schema.org/draft-04/schema#",
     "description": "Transform X to a cluster-distance space.",
@@ -244,12 +257,62 @@ _combined_schemas = {
 }
 KMeans = make_operator(SKLModel, _combined_schemas)
 
-if sklearn.__version__ >= "1.0":
+if sklearn_version >= version.Version("1.0"):
     # old: https://scikit-learn.org/0.24/modules/generated/sklearn.cluster.KMeans.html
     # new: https://scikit-learn.org/1.0/modules/generated/sklearn.cluster.KMeans.html
     KMeans = KMeans.customize_schema(
         precompute_distances=None,
         n_jobs=None,
+        set_as_available=True,
+    )
+
+if sklearn_version >= version.Version("1.1"):
+    # old: https://scikit-learn.org/1.0/modules/generated/sklearn.cluster.KMeans.html
+    # new: https://scikit-learn.org/1.1/modules/generated/sklearn.cluster.KMeans.html
+    KMeans = KMeans.customize_schema(
+        algorithm={
+            "description": """K-means algorithm to use.
+The classical EM-style algorithm is “full”. The “elkan” variation is more efficient on data with well-defined clusters, by using the triangle inequality.
+However it’s more memory intensive due to the allocation of an extra array of shape (n_samples, n_clusters).
+For now “auto” (kept for backward compatibiliy) chooses “elkan” but it might change in the future for a better heuristic.""",
+            "enum": ["lloyd", "elkan", "auto", "full"],
+            "default": "lloyd",
+        },
+        set_as_available=True,
+    )
+
+if sklearn_version >= version.Version("1.2"):
+    # old: https://scikit-learn.org/1.1/modules/generated/sklearn.cluster.KMeans.html
+    # new: https://scikit-learn.org/1.2/modules/generated/sklearn.cluster.KMeans.html
+    KMeans = KMeans.customize_schema(
+        n_init={
+            "anyOf": [
+                {
+                    "type": "integer",
+                    "minimumForOptimizer": 3,
+                    "maximumForOptimizer": 10,
+                    "distribution": "uniform",
+                },
+                {
+                    "enum": ["auto"],
+                },
+            ],
+            "default": 10,
+            "description": """Number of time the k-means algorithm will be run with different centroid seeds.
+The final results will be the best output of n_init consecutive runs in terms of inertia.
+When n_init='auto', the number of runs will be 10 if using init='random', and 1 if using init='kmeans++'.""",
+        }
+    )
+
+if sklearn_version >= version.Version("1.3"):
+    KMeans = KMeans.customize_schema(
+        algorithm={
+            "description": """K-means algorithm to use.
+The classical EM-style algorithm is “lloyd”. The “elkan” variation is more efficient on data with well-defined clusters, by using the triangle inequality.
+However it’s more memory intensive due to the allocation of an extra array of shape (n_samples, n_clusters).""",
+            "enum": ["lloyd", "elkan"],
+            "default": "lloyd",
+        },
         set_as_available=True,
     )
 

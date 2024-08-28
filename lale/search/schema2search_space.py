@@ -17,6 +17,7 @@ from typing import Any, Dict, Iterable, List, Optional, Set, Tuple, Union
 
 import jsonschema
 
+import lale.type_checking
 from lale.operators import (
     Operator,
     OperatorChoice,
@@ -77,7 +78,9 @@ class OperatorSchemaError(VisitorPathError):
 
 
 def op_to_search_space(
-    op: PlannedOperator, pgo: Optional[PGO] = None, data_schema={}
+    op: PlannedOperator,
+    pgo: Optional[PGO] = None,
+    data_schema: Optional[Dict[str, Any]] = None,
 ) -> SearchSpace:
     """Given an operator, this method compiles its schemas into a SearchSpace"""
     search_space = SearchSpaceOperatorVisitor.run(op, pgo=pgo, data_schema=data_schema)
@@ -95,7 +98,7 @@ def get_default(schema) -> Optional[Any]:
     if d is not None:
         try:
             s = forOptimizer(schema)
-            jsonschema.validate(d, s, jsonschema.Draft4Validator)
+            lale.type_checking._validator.validate(d, s)
             return d
         except jsonschema.ValidationError:
             logger.debug(
@@ -105,7 +108,7 @@ def get_default(schema) -> Optional[Any]:
     return None
 
 
-class FreqsWrapper(object):
+class FreqsWrapper:
     base: Optional[Dict[str, Freqs]]
 
     def __init__(self, base: Optional[Dict[str, Freqs]]):
@@ -165,16 +168,22 @@ def add_sub_space(space, k, v):
 # or do we just add the paths later as needed?
 class SearchSpaceOperatorVisitor(Visitor):
     pgo: Optional[PGO]
+    data_schema: Optional[Dict[str, Any]]
 
     @classmethod
     def run(
-        cls, op: PlannedOperator, pgo: Optional[PGO] = None, data_schema={}
+        cls,
+        op: PlannedOperator,
+        pgo: Optional[PGO] = None,
+        data_schema: Optional[Dict[str, Any]] = None,
     ) -> SearchSpace:
         visitor = cls(pgo=pgo, data_schema=data_schema)
         return accept(op, visitor)
 
-    def __init__(self, pgo: Optional[PGO] = None, data_schema={}):
-        super(SearchSpaceOperatorVisitor, self).__init__()
+    def __init__(
+        self, pgo: Optional[PGO] = None, data_schema: Optional[Dict[str, Any]] = None
+    ):
+        super().__init__()
         self.pgo = pgo
         self.data_schema = data_schema
 
@@ -194,7 +203,7 @@ class SearchSpaceOperatorVisitor(Visitor):
         if hasattr(op, "_hyperparams"):
             hyperparams = op.hyperparams()
             if hyperparams:
-                for (k, v) in hyperparams.items():
+                for k, v in hyperparams.items():
                     add_sub_space(space, k, v)
         return space
 
@@ -203,7 +212,7 @@ class SearchSpaceOperatorVisitor(Visitor):
 
     def visitPlannedPipeline(self, op: "PlannedPipeline") -> SearchSpace:
         spaces: List[Tuple[str, SearchSpace]] = [
-            (s.name(), accept(s, self)) for s in op.steps()
+            (s.name(), accept(s, self)) for s in op.steps_list()
         ]
         return SearchSpaceProduct(spaces)
 
@@ -211,7 +220,7 @@ class SearchSpaceOperatorVisitor(Visitor):
     visitTrainedPipeline = visitPlannedPipeline
 
     def visitOperatorChoice(self, op: "OperatorChoice") -> SearchSpace:
-        spaces: List[SearchSpace] = [accept(s, self) for s in op.steps()]
+        spaces: List[SearchSpace] = [accept(s, self) for s in op.steps_list()]
 
         return SearchSpaceSum(spaces)
 
@@ -265,8 +274,6 @@ class SearchSpaceOperatorVisitor(Visitor):
         typ = schema.get("laleType", None)
         if typ is None:
             typ = schema.get("type", None)
-        else:
-            typ = typ
 
         if "enum" in schema and typ != "operator":
             vals = schema["enum"]
@@ -279,7 +286,7 @@ class SearchSpaceOperatorVisitor(Visitor):
                 return SearchSpaceBool(
                     pgo=asFreqs(pgo_freqs), default=get_default(schema)
                 )
-            elif typ == "number" or typ == "integer":
+            elif typ in ["number", "integer"]:
                 exclusive_minimum = False
                 minimum = schema.get("minimumForOptimizer", None)
                 if minimum is not None:
@@ -302,7 +309,12 @@ class SearchSpaceOperatorVisitor(Visitor):
                     if maximum is not None:
                         exclusive_maximum = schema.get("exclusiveMaximum", False)
 
-                distribution = schema.get("distribution", None)
+                distribution = schema.get("distribution", "uniform")
+                if not isinstance(distribution, str):
+                    raise OperatorSchemaError(
+                        path,
+                        f"specified distribution should be a string, not: {distribution}.",
+                    )
 
                 laleType = schema.get("laleType", None)
                 if laleType is None:
@@ -318,8 +330,6 @@ class SearchSpaceOperatorVisitor(Visitor):
                         f"specified laleType should be a number or integer, not: {laleType}.",
                     )
 
-                pgo: Freqs
-
                 return SearchSpaceNumber(
                     minimum=minimum,
                     exclusiveMinimum=exclusive_minimum,
@@ -330,7 +340,7 @@ class SearchSpaceOperatorVisitor(Visitor):
                     pgo=asFreqs(pgo_freqs),
                     default=get_default(schema),
                 )
-            elif typ == "array" or typ == "tuple":
+            elif typ in ["array", "tuple"]:
                 laleType = schema.get("laleType", None)
                 if laleType is None:
                     laleType = typ
@@ -435,7 +445,7 @@ class SearchSpaceOperatorVisitor(Visitor):
                 else:
                     all_keys = list(o.keys())
                     all_keys.sort()
-                    o_choice = tuple([o.get(k, None) for k in all_keys])
+                    o_choice = tuple(o.get(k, None) for k in all_keys)
                     return SearchSpaceObject(longName, all_keys, [o_choice])
 
             elif typ == "string":
@@ -450,9 +460,11 @@ class SearchSpaceOperatorVisitor(Visitor):
                     return None
 
                 sub_schemas: List[SearchSpace] = [
-                    accept(op, self)
-                    if isinstance(op, Operator)
-                    else SearchSpaceConstant(op)
+                    (
+                        accept(op, self)
+                        if isinstance(op, Operator)
+                        else SearchSpaceConstant(op)
+                    )
                     for op in vals
                 ]
                 combined_sub_schema: SearchSpace
@@ -506,7 +518,7 @@ class SearchSpaceOperatorVisitor(Visitor):
 
                 anys: Dict[str, Any] = {}
                 for o in objs:
-                    o_choice = tuple([o.get(k, None) for k in all_keys])
+                    o_choice = tuple(o.get(k, None) for k in all_keys)
                     k = str(
                         [as_str(all_keys[idx], c) for idx, c in enumerate(o_choice)]
                     )
@@ -613,5 +625,5 @@ class SearchSpaceOperatorVisitor(Visitor):
     def schemaToSearchSpace(
         self, longName: str, name: str, schema: JsonSchema
     ) -> Optional[SearchSpace]:
-        (s, h) = self.schemaToSimplifiedAndSearchSpace(longName, name, schema)
+        (_s, h) = self.schemaToSimplifiedAndSearchSpace(longName, name, schema)
         return h

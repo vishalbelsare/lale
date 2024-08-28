@@ -24,25 +24,27 @@ import sklearn.model_selection
 import lale.docstrings
 import lale.helpers
 import lale.operators
-
-from ._common_schemas import (
+from lale.lib._common_schemas import (
     schema_best_score_single,
+    schema_cv,
     schema_max_opt_time,
     schema_scoring_single,
 )
 
-try:
-    import xgboost  # noqa: F401
+with warnings.catch_warnings():
+    warnings.filterwarnings("ignore", category=FutureWarning)
+    try:
+        import xgboost  # noqa: F401
 
-    xgboost_installed = True
-except ImportError:
-    xgboost_installed = False
-try:
-    import lightgbm.sklearn  # noqa: F401
+        xgboost_installed = True
+    except ImportError:
+        xgboost_installed = False
+    try:
+        import lightgbm.sklearn  # noqa: F401
 
-    lightgbm_installed = True
-except ImportError:
-    lightgbm_installed = False
+        lightgbm_installed = True
+    except ImportError:
+        lightgbm_installed = False
 
 
 def auto_prep(X):
@@ -75,29 +77,29 @@ def auto_gbt(prediction_type):
         if xgboost_installed:
             from lale.lib.xgboost import XGBRegressor
 
-            return XGBRegressor
+            return XGBRegressor(verbosity=0)
         elif lightgbm_installed:
             from lale.lib.lightgbm import LGBMRegressor
 
-            return LGBMRegressor
+            return LGBMRegressor()
         else:
             from lale.lib.sklearn import GradientBoostingRegressor
 
-            return GradientBoostingRegressor
+            return GradientBoostingRegressor()
     else:
         assert prediction_type in ["binary", "multiclass", "classification"]
         if xgboost_installed:
             from lale.lib.xgboost import XGBClassifier
 
-            return XGBClassifier
+            return XGBClassifier(verbosity=0)
         elif lightgbm_installed:
             from lale.lib.lightgbm import LGBMClassifier
 
-            return LGBMClassifier
+            return LGBMClassifier()
         else:
             from lale.lib.sklearn import GradientBoostingClassifier
 
-            return GradientBoostingClassifier
+            return GradientBoostingClassifier()
 
 
 class _AutoPipelineImpl:
@@ -113,6 +115,7 @@ class _AutoPipelineImpl:
         max_evals=100,
         max_opt_time=600.0,
         max_eval_time=120.0,
+        cv=5,
     ):
         self.prediction_type = prediction_type
         self.max_opt_time = max_opt_time
@@ -125,6 +128,7 @@ class _AutoPipelineImpl:
         self._scorer = sklearn.metrics.get_scorer(scoring)
         self.best_score = best_score
         self._summary = None
+        self.cv = cv
 
     def _try_and_add(self, name, trainable, X, y):
         assert name not in self._pipelines
@@ -134,7 +138,7 @@ class _AutoPipelineImpl:
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
             cv = sklearn.model_selection.check_cv(
-                cv=5, classifier=(self.prediction_type != "regression")
+                cv=self.cv, classifier=(self.prediction_type != "regression")
             )
             (
                 cv_score,
@@ -180,16 +184,14 @@ class _AutoPipelineImpl:
 
         gbt = auto_gbt(self.prediction_type)
         trainable = (
-            Project(columns={"type": "number"})
-            >> SimpleImputer(strategy="mean")
-            >> gbt()
+            Project(columns={"type": "number"}) >> SimpleImputer(strategy="mean") >> gbt
         )
         self._try_and_add("gbt_num", trainable, X, y)
 
     def _fit_gbt_all(self, X, y):
         prep = auto_prep(X)
         gbt = auto_gbt(self.prediction_type)
-        trainable = prep >> gbt()
+        trainable = prep >> gbt
         self._try_and_add("gbt_all", trainable, X, y)
 
     def _fit_hyperopt(self, X, y):
@@ -236,6 +238,7 @@ class _AutoPipelineImpl:
             max_eval_time=self.max_eval_time,
             verbose=self.verbose,
             show_progressbar=False,
+            cv=self.cv,
         )
         trained = trainable.fit(X, y)
         # The static types are not currently smart enough to verify
@@ -286,7 +289,11 @@ class _AutoPipelineImpl:
             self._summary.sort_values(by="loss", inplace=True)
         return self._summary
 
-    def get_pipeline(self, pipeline_name=None, astype="lale"):
+    def get_pipeline(
+        self,
+        pipeline_name: Optional[str] = None,
+        astype: lale.helpers.astype_type = "lale",
+    ):
         """Retrieve one of the trials.
         Parameters
         ----------
@@ -319,6 +326,7 @@ _hyperparams_schema = {
                 "max_evals",
                 "max_opt_time",
                 "max_eval_time",
+                "cv",
             ],
             "relevantToOptimizer": [],
             "additionalProperties": False,
@@ -354,6 +362,7 @@ This is also logged using logger.warning in Hyperopt.""",
                     ],
                     "default": 120.0,
                 },
+                "cv": schema_cv,
             },
         }
     ]
@@ -401,9 +410,9 @@ without having to specify your own planned pipeline first. It is
 designed to be simple at the expense of not offering much control.
 For an example, see `demo_auto_pipeline.ipynb`_.
 
-.. _`demo_auto_pipeline.ipynb`: https://nbviewer.jupyter.org/github/IBM/lale/blob/master/examples/demo_auto_pipeline.ipynb
+.. _`demo_auto_pipeline.ipynb`: https://github.com/IBM/lale/blob/master/examples/demo_auto_pipeline.ipynb
 """,
-    "documentation_url": "https://lale.readthedocs.io/en/latest/modules/lale.lib.lale.auto_pipelines.html",
+    "documentation_url": "https://lale.readthedocs.io/en/latest/modules/lale.lib.lale.auto_pipeline.html",
     "import_from": "lale.lib.lale",
     "type": "object",
     "tags": {"pre": [], "op": ["estimator"], "post": []},

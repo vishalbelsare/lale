@@ -11,12 +11,14 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+from packaging import version
+
 try:
     import snapml  # type: ignore
 
-    snapml_installed = True
+    snapml_version = version.parse(getattr(snapml, "__version__"))
 except ImportError:
-    snapml_installed = False
+    snapml_version = None
 
 import lale.datasets.data_schemas
 import lale.docstrings
@@ -24,63 +26,12 @@ import lale.operators
 
 
 class _SnapBoostingMachineRegressorImpl:
-    def __init__(
-        self,
-        num_round=100,
-        objective="mse",
-        learning_rate=0.1,
-        random_state=0,
-        colsample_bytree=1.0,
-        subsample=1.0,
-        verbose=False,
-        lambda_l2=0.0,
-        early_stopping_rounds=10,
-        compress_trees=False,
-        base_score=None,
-        max_depth=None,
-        min_max_depth=1,
-        max_max_depth=5,
-        n_jobs=1,
-        use_histograms=True,
-        hist_nbins=256,
-        use_gpu=False,
-        gpu_id=0,
-        tree_select_probability=1.0,
-        regularizer=1.0,
-        fit_intercept=False,
-        gamma=1.0,
-        n_components=10,
-    ):
+    def __init__(self, **hyperparams):
         assert (
-            snapml_installed
+            snapml_version is not None
         ), """Your Python environment does not have snapml installed. Install using: pip install snapml"""
-        self._hyperparams = {
-            "num_round": num_round,
-            "objective": objective,
-            "learning_rate": learning_rate,
-            "random_state": random_state,
-            "colsample_bytree": colsample_bytree,
-            "subsample": subsample,
-            "verbose": verbose,
-            "lambda_l2": lambda_l2,
-            "early_stopping_rounds": early_stopping_rounds,
-            "compress_trees": compress_trees,
-            "base_score": base_score,
-            "max_depth": max_depth,
-            "min_max_depth": min_max_depth,
-            "max_max_depth": max_max_depth,
-            "n_jobs": n_jobs,
-            "use_histograms": use_histograms,
-            "hist_nbins": hist_nbins,
-            "use_gpu": use_gpu,
-            "gpu_id": gpu_id,
-            "tree_select_probability": tree_select_probability,
-            "regularizer": regularizer,
-            "fit_intercept": fit_intercept,
-            "gamma": gamma,
-            "n_components": n_components,
-        }
-        self._wrapped_model = snapml.SnapBoostingMachineRegressor(**self._hyperparams)
+
+        self._wrapped_model = snapml.SnapBoostingMachineRegressor(**hyperparams)
 
     def fit(self, X, y, **fit_params):
         X = lale.datasets.data_schemas.strip_schema(X)
@@ -395,5 +346,41 @@ _combined_schemas = {
 SnapBoostingMachineRegressor = lale.operators.make_operator(
     _SnapBoostingMachineRegressorImpl, _combined_schemas
 )
+
+if snapml_version is not None and snapml_version >= version.Version("1.12"):
+    SnapBoostingMachineRegressor = SnapBoostingMachineRegressor.customize_schema(
+        max_delta_step={
+            "description": """Regularization term to ensure numerical stability.""",
+            "anyOf": [
+                {
+                    "type": "number",
+                    "minimum": 0.0,
+                },
+                {"enum": [None]},
+            ],
+            "default": 0.0,
+        }
+    )
+
+if snapml_version is not None and snapml_version >= version.Version("1.14"):
+    SnapBoostingMachineRegressor = SnapBoostingMachineRegressor.customize_schema(
+        alpha={
+            "type": "number",
+            "minimum": 0.0,
+            "exclusiveMinimum": True,
+            "minimumForOptimizer": 1e-10,
+            "maximumForOptimizer": 1.0,
+            "default": 0.5,
+            "description": "Quantile used when 'objective = quantile'.",
+        },
+        min_h_quantile={
+            "type": "number",
+            "minimumForOptimizer": 0.0,
+            "maximumForOptimizer": 1.0,
+            "default": 0.0,
+            "description": "Regularization term for quantile regression.",
+        },
+        set_as_available=True,
+    )
 
 lale.docstrings.set_docstrings(SnapBoostingMachineRegressor)

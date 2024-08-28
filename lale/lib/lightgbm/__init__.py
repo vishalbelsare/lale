@@ -27,5 +27,15 @@ Operators:
 .. _`LGBMRegressor`: lale.lib.lightgbm.lgbm_regressor.html
 """
 
-from .lgbm_classifier import LGBMClassifier
-from .lgbm_regressor import LGBMRegressor
+from lale import register_lale_wrapper_modules
+
+from .lgbm_classifier import LGBMClassifier as LGBMClassifier
+from .lgbm_regressor import LGBMRegressor as LGBMRegressor
+
+# Note: all imports should be done as
+# from .xxx import XXX as XXX
+# this ensures that pyright considers them to be publicly available
+# and not private imports (this affects lale users that use pyright)
+
+
+register_lale_wrapper_modules(__name__)

@@ -13,11 +13,12 @@
 # limitations under the License.
 
 import pandas as pd
+from packaging import version
 from sklearn.ensemble import StackingClassifier as SKLModel
 
 import lale.docstrings
 import lale.operators
-from lale.lib.lale._common_schemas import schema_cv
+from lale.lib._common_schemas import schema_cv
 
 from .stacking_utils import _concatenate_predictions_pandas
 
@@ -249,5 +250,18 @@ StackingClassifier: lale.operators.PlannedIndividualOp
 StackingClassifier = lale.operators.make_operator(
     _StackingClassifierImpl, _combined_schemas
 )
+
+if lale.operators.sklearn_version >= version.Version("1.1"):
+    from lale.lib._common_schemas import schema_cv_1_1
+
+    StackingClassifier = StackingClassifier.customize_schema(
+        cv=schema_cv_1_1,
+        set_as_available=True,
+    )
+
+if lale.operators.sklearn_version >= version.Version("1.2"):
+    from lale.lib._common_schemas import schema_cv_1_1
+
+    StackingClassifier = StackingClassifier.customize_schema()
 
 lale.docstrings.set_docstrings(StackingClassifier)

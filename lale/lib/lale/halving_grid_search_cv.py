@@ -21,13 +21,13 @@ import lale.helpers
 import lale.lib.sklearn
 import lale.operators
 import lale.search.lale_grid_search_cv
-
-from ._common_schemas import (
+from lale.lib._common_schemas import (
+    schema_cv,
     schema_estimator,
     schema_max_opt_time,
     schema_scoring_single,
-    schema_simple_cv,
 )
+
 from .observing import Observing
 
 func_timeout_installed = False
@@ -175,8 +175,10 @@ class _HalvingGridSearchCVImpl:
                             func_timeout(
                                 self._hyperparams["max_opt_time"], self.grid.fit, (X, y)
                             )
-                        except FunctionTimedOut:
-                            raise BaseException("HalvingGridSearchCV timed out.")
+                        except FunctionTimedOut as exc:
+                            raise BaseException(  # pylint:disable=broad-exception-raised
+                                "HalvingGridSearchCV timed out."
+                            ) from exc
                     else:
                         raise ValueError(
                             f"""max_opt_time is set to {self._hyperparams["max_opt_time"]} but the Python package
@@ -214,7 +216,9 @@ class _HalvingGridSearchCVImpl:
         assert self._best_estimator is not None
         return self._best_estimator.predict(X, **predict_params)
 
-    def get_pipeline(self, pipeline_name=None, astype="lale"):
+    def get_pipeline(
+        self, pipeline_name=None, astype: lale.helpers.astype_type = "lale"
+    ):
         if pipeline_name is not None:
             raise NotImplementedError("Cannot get pipeline by name yet.")
         result = self._best_estimator
@@ -243,7 +247,7 @@ _hyperparams_schema = {
             "properties": {
                 "estimator": schema_estimator,
                 "scoring": schema_scoring_single,
-                "cv": schema_simple_cv,
+                "cv": schema_cv,
                 "verbose": {
                     "description": "Controls the verbosity: the higher, the more messages.",
                     "type": "integer",

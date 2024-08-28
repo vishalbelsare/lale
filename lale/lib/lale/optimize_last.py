@@ -18,16 +18,14 @@ from typing import Any, Dict, Optional
 import lale.docstrings
 import lale.operators
 import lale.pretty_print
+from lale.lib._common_schemas import schema_estimator
 from lale.lib.lale.optimize_suffix import OptimizeSuffix
-
-from ._common_schemas import schema_estimator
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.ERROR)
 
 
-class _OptimizeLast:
-
+class _OptimizeLastImpl:
     _suffix_optimizer: lale.operators.Operator
 
     def __init__(
@@ -45,12 +43,12 @@ class _OptimizeLast:
             last_estimator = estimator.clone()
         else:
             assert isinstance(estimator, lale.operators.TrainedPipeline)
-            steps = estimator.steps()
+            steps = estimator.steps_list()
             num_steps = len(steps)
             if num_steps == 0:
                 last_estimator = None
             else:
-                last_estimator = estimator.steps()[-1].clone()
+                last_estimator = estimator.steps_list()[-1].clone()
             lale_prefix = estimator.remove_last()
 
         self._suffix_optimizer = OptimizeSuffix(
@@ -65,7 +63,8 @@ class _OptimizeLast:
         return getattr(self._suffix_optimizer.shallow_impl, item)
 
     def fit(self, X_train, y_train=None, **kwargs):
-        return self._suffix_optimizer.fit(X_train, y_train, **kwargs)
+        self._suffix_optimizer = self._suffix_optimizer.fit(X_train, y_train, **kwargs)
+        return self
 
     def predict(self, X_eval, **predict_params):
         return self._suffix_optimizer.predict(X_eval, **predict_params)
@@ -135,6 +134,6 @@ Examples
 }
 
 
-OptimizeLast = lale.operators.make_operator(_OptimizeLast, _combined_schemas)
+OptimizeLast = lale.operators.make_operator(_OptimizeLastImpl, _combined_schemas)
 
 lale.docstrings.set_docstrings(OptimizeLast)

@@ -1,4 +1,4 @@
-# Copyright 2019 IBM Corporation
+# Copyright 2019-2023 IBM Corporation
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -14,8 +14,6 @@
 
 import logging
 import os
-
-# import sys
 from datetime import datetime
 
 from setuptools import find_packages, setup
@@ -43,19 +41,21 @@ if on_rtd:
 else:
     install_requires = [
         "numpy",
-        "black==19.10b0",
+        "black>=22.1.0",
         "graphviz",
-        "hyperopt<=0.2.5",
-        "jsonschema",
-        "jsonsubschema",
-        "scikit-learn",
+        "hyperopt>=0.2,<=0.2.7",
+        "jsonschema<=4.20.0",
+        "jsonsubschema>=0.0.6",
+        "scikit-learn>=1.0.0,<1.5.0",
         "scipy",
         "pandas",
+        "packaging",
         "decorator",
         "astunparse",
+        "typing-extensions",
     ]
 
-import lale  # noqa: E402
+import lale  # noqa: E402  # pylint:disable=wrong-import-position
 
 if "TRAVIS" in os.environ:
     now = datetime.now().strftime("%y%m%d%H%M")
@@ -65,14 +65,15 @@ else:
 
 extras_require = {
     "full": [
-        "xgboost<=1.3.3",
-        "lightgbm",
-        "snapml>=1.7.0rc3",
+        "mystic",
+        "xgboost<2.1.0",
+        "lightgbm<4.4.0",
+        "snapml>=1.7.0rc3,<1.16.0",
         "liac-arff>=2.4.0",
-        "tensorflow==2.4.0",
+        "tensorflow>=2.4.0,<=2.16.0",
         "smac<=0.10.0",
-        "numba==0.49.0",
-        "aif360>=0.4.0",
+        "numba",
+        "aif360>=0.5.0",
         "torch>=1.0",
         "BlackBoxAuditing",
         "imbalanced-learn",
@@ -82,28 +83,62 @@ extras_require = {
     ],
     "dev": ["pre-commit"],
     "test": [
-        "autoai-libs>=1.12.6",
+        "mystic",
         "joblib",
+        "ipython<8.8.0",
         "jupyter",
-        "numpydoc",
-        "sphinx==2.4.4",
-        "m2r",
-        "sphinx_rtd_theme",
+        "lxml<5.2.0",
+        "sphinx>=5.0.0",
+        "sphinx_rtd_theme>=0.5.2",
+        "docutils<0.17",
+        "m2r2",
         "sphinxcontrib.apidoc",
+        "sphinxcontrib-svg2pdfconverter",
         "pytest",
         "pyspark",
         "func_timeout",
+        "category-encoders",
+        "pynisher==0.6.4",
     ],
     "fairness": [
+        "mystic",
         "liac-arff>=2.4.0",
-        "aif360<0.4.0",
+        "aif360>=0.5.0",
+        "imbalanced-learn",
         "BlackBoxAuditing",
+    ],
+    "tutorial": [
+        "ipython<8.8.0",
+        "jupyter",
+        "xgboost<=1.5.1",
+        "imbalanced-learn",
+        "liac-arff>=2.4.0",
+        "aif360>=0.5.0",
+        "BlackBoxAuditing",
+        "typing-extensions",
+        "pandas<2.0.0",
     ],
 }
 
-# # Inserting tensorflow 1.x only for Python 3.7
-# if sys.version_info.minor == 7:
-#     extras_require["full"].append("tensorflow>=1.13.1,<2")
+classifiers = [
+    "Development Status :: 5 - Production/Stable",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: Apache Software License",
+    "Operating System :: MacOS",
+    "Operating System :: Microsoft :: Windows",
+    "Operating System :: POSIX",
+    "Operating System :: Unix",
+    "Programming Language :: Python",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.8",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Topic :: Software Development",
+    "Topic :: Scientific/Engineering",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
 
 setup(
     name="lale",
@@ -113,9 +148,11 @@ setup(
     long_description=long_description,
     long_description_content_type="text/markdown",
     url="https://github.com/IBM/lale",
-    python_requires=">=3.6",
+    python_requires=">=3.8",
+    package_data={"lale": ["py.typed"]},
     packages=find_packages(),
-    license="",
+    license="Apache License 2.0",
+    classifiers=classifiers,
     install_requires=install_requires,
     extras_require=extras_require,
 )

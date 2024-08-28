@@ -11,12 +11,14 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+from packaging import version
+
 try:
     import snapml  # type: ignore
 
-    snapml_installed = True
+    snapml_version = version.parse(getattr(snapml, "__version__"))
 except ImportError:
-    snapml_installed = False
+    snapml_version = None
 
 import lale.datasets.data_schemas
 import lale.docstrings
@@ -24,44 +26,20 @@ import lale.operators
 
 
 class _SnapRandomForestClassifierImpl:
-    def __init__(
-        self,
-        n_estimators=10,
-        criterion="gini",
-        max_depth=None,
-        min_samples_leaf=1,
-        max_features="auto",
-        bootstrap=True,
-        n_jobs=1,
-        random_state=None,
-        verbose=False,
-        use_histograms=False,
-        hist_nbins=256,
-        use_gpu=False,
-        gpu_ids=None,
-    ):
+    def __init__(self, **hyperparams):
         assert (
-            snapml_installed
+            snapml_version is not None
         ), """Your Python environment does not have snapml installed. Install using: pip install snapml"""
-        self._hyperparams = {
-            "n_estimators": n_estimators,
-            "criterion": criterion,
-            "max_depth": max_depth,
-            "min_samples_leaf": min_samples_leaf,
-            "max_features": max_features,
-            "bootstrap": bootstrap,
-            "n_jobs": n_jobs,
-            "random_state": random_state,
-            "verbose": verbose,
-            "use_histograms": use_histograms,
-            "hist_nbins": hist_nbins,
-            "use_gpu": use_gpu,
-            "gpu_ids": gpu_ids,
-        }
-        modified_hps = {**self._hyperparams}
-        if modified_hps["gpu_ids"] is None:
-            modified_hps["gpu_ids"] = [0]  # TODO: support list as default
-        self._wrapped_model = snapml.SnapRandomForestClassifier(**modified_hps)
+
+        if (
+            snapml_version <= version.Version("1.7.8")
+            and "compress_trees" in hyperparams
+        ):
+            del hyperparams["compress_trees"]
+        if hyperparams.get("gpu_ids", None) is None:
+            hyperparams["gpu_ids"] = [0]
+
+        self._wrapped_model = snapml.SnapRandomForestClassifier(**hyperparams)
 
     def fit(self, X, y, **fit_params):
         X = lale.datasets.data_schemas.strip_schema(X)
@@ -342,5 +320,17 @@ _combined_schemas = {
 SnapRandomForestClassifier = lale.operators.make_operator(
     _SnapRandomForestClassifierImpl, _combined_schemas
 )
+
+if snapml_version is not None and snapml_version > version.Version("1.7.8"):  # type: ignore # noqa
+    from lale.schemas import Bool
+
+    SnapRandomForestClassifier = SnapRandomForestClassifier.customize_schema(
+        compress_trees=Bool(
+            desc="""Compress trees after training for fast inference.""",
+            default=False,
+            forOptimizer=False,
+        ),
+        set_as_available=True,
+    )
 
 lale.docstrings.set_docstrings(SnapRandomForestClassifier)

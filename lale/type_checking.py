@@ -32,22 +32,28 @@ as the right side succeed. This is specified using ``{'laleType': 'Any'}``.
 
 import functools
 import inspect
-from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple, overload
+from collections.abc import Iterable
+from typing import Any, Dict, List, Optional, Tuple, overload
 
 import jsonschema
 import jsonschema.exceptions
 import jsonschema.validators
 import jsonsubschema
+import numpy as np
+import numpy.random
+import sklearn.base
 
+import lale.datasets.data_schemas
+import lale.expressions
 import lale.helpers
-
-if TYPE_CHECKING:
-    import lale.operators
+import lale.operators
 
 JSON_TYPE = Dict[str, Any]
 
 
-def _validate_lale_type(validator, laleType, instance, schema):
+def _validate_lale_type(
+    validator, laleType, instance, schema
+):  # pylint:disable=unused-argument
     # https://github.com/Julian/jsonschema/blob/master/jsonschema/_validators.py
     if laleType == "Any":
         return
@@ -57,13 +63,8 @@ def _validate_lale_type(validator, laleType, instance, schema):
                 f"expected {laleType}, got {type(instance)}"
             )
     elif laleType == "operator":
-        import sklearn.base
-
-        import lale.operators
-
         if not (
-            isinstance(instance, lale.operators.Operator)
-            or isinstance(instance, sklearn.base.BaseEstimator)
+            isinstance(instance, (lale.operators.Operator, sklearn.base.BaseEstimator))
             or (
                 inspect.isclass(instance)
                 and issubclass(instance, sklearn.base.BaseEstimator)
@@ -73,28 +74,38 @@ def _validate_lale_type(validator, laleType, instance, schema):
                 f"expected {laleType}, got {type(instance)}"
             )
     elif laleType == "expression":
-        import lale.expressions
-
         if not isinstance(instance, lale.expressions.Expr):
             yield jsonschema.exceptions.ValidationError(
                 f"expected {laleType}, got {type(instance)}"
             )
     elif laleType == "numpy.random.RandomState":
-        import numpy.random
-
         if not isinstance(instance, numpy.random.RandomState):
+            yield jsonschema.exceptions.ValidationError(
+                f"expected {laleType}, got {type(instance)}"
+            )
+    elif laleType == "CrossvalGenerator":
+        if not (hasattr(instance, "split") or isinstance(instance, Iterable)):
             yield jsonschema.exceptions.ValidationError(
                 f"expected {laleType}, got {type(instance)}"
             )
 
 
+def _is_extended_boolean(checker, instance):
+    # https://python-jsonschema.readthedocs.io/en/stable/validate/#jsonschema.TypeChecker
+    return isinstance(instance, (bool, np.bool_))
+
+
 # https://github.com/Julian/jsonschema/blob/master/jsonschema/validators.py
 _lale_validator = jsonschema.validators.extend(
-    validator=jsonschema.Draft4Validator, validators={"laleType": _validate_lale_type}
+    validator=jsonschema.Draft4Validator,
+    validators={"laleType": _validate_lale_type},
+    type_checker=jsonschema.Draft4Validator.TYPE_CHECKER.redefine(
+        "boolean", _is_extended_boolean
+    ),
 )
 
 
-def always_validate_schema(value, schema: JSON_TYPE, subsample_array: bool = True):
+def always_validate_schema(value: Any, schema: JSON_TYPE, subsample_array: bool = True):
     """Validate that the value is an instance of the schema.
 
     Parameters
@@ -114,12 +125,17 @@ def always_validate_schema(value, schema: JSON_TYPE, subsample_array: bool = Tru
         The value was invalid for the schema.
     """
     json_value = lale.helpers.data_to_json(value, subsample_array)
-    jsonschema.validate(
-        json_value, lale.helpers.data_to_json(schema, False), _lale_validator
-    )
+    sch: Any = lale.helpers.data_to_json(schema, False)
+    try:
+        validator = _lale_validator(sch)
+        validator.validate(json_value)
+    except Exception:
+        jsonschema.validate(json_value, sch, _lale_validator)
 
 
-def validate_schema_directly(value, schema: JSON_TYPE, subsample_array: bool = True):
+def validate_schema_directly(
+    value: Any, schema: JSON_TYPE, subsample_array: bool = True
+):
     """Validate that the value is an instance of the schema.
 
     Parameters
@@ -152,22 +168,25 @@ def _json_meta_schema() -> Dict[str, Any]:
     return jsonschema.Draft4Validator.META_SCHEMA
 
 
+_validator = jsonschema.Draft4Validator(_json_meta_schema())
+
+
 def validate_is_schema(value: Dict[str, Any]):
     # only checking hyperparams schema validation flag because it is likely to be true and this call is cheap.
     from lale.settings import disable_hyperparams_schema_validation
 
     if disable_hyperparams_schema_validation:
-        return True
+        return
 
     if "$schema" in value:
         assert value["$schema"] == _JSON_META_SCHEMA_URL
-    jsonschema.validate(value, _json_meta_schema())
+    _validator.validate(value)
 
 
 def is_schema(value) -> bool:
     if isinstance(value, dict):
         try:
-            jsonschema.validate(value, _json_meta_schema())
+            _validator.validate(value)
         except jsonschema.ValidationError:
             return False
         return True
@@ -179,13 +198,13 @@ def _json_replace(subject, old, new):
         return new
     if isinstance(subject, list):
         result = [_json_replace(s, old, new) for s in subject]
-        for i in range(len(subject)):
-            if subject[i] != result[i]:
+        for s, r in zip(subject, result):
+            if s != r:
                 return result
     elif isinstance(subject, tuple):
-        result = tuple([_json_replace(s, old, new) for s in subject])
-        for i in range(len(subject)):
-            if subject[i] != result[i]:
+        result = tuple(_json_replace(s, old, new) for s in subject)
+        for s, r in zip(subject, result):
+            if s != r:
                 return result
     elif isinstance(subject, dict):
         if isinstance(old, dict):
@@ -203,7 +222,7 @@ def _json_replace(subject, old, new):
     return subject  # nothing changed so share original object (not a copy)
 
 
-def is_subschema(sub_schema, super_schema) -> bool:
+def is_subschema(sub_schema: JSON_TYPE, super_schema: JSON_TYPE) -> bool:
     """Is sub_schema a subschema of super_schema?
 
     Parameters
@@ -218,7 +237,13 @@ def is_subschema(sub_schema, super_schema) -> bool:
     -------
     bool
         True if `sub_schema <: super_schema`, False otherwise.
+
+    Raises
+    ------
+    jsonschema.ValueError
+        An error occured while checking the subschema relation
     """
+
     new_sub = _json_replace(sub_schema, {"laleType": "Any"}, {"not": {}})
     try:
         return jsonsubschema.isSubschema(new_sub, super_schema)
@@ -239,10 +264,10 @@ class SubschemaError(Exception):
 
     def __str__(self):
         summary = f"Expected {self.sub_name} to be a subschema of {self.sup_name}."
-        import lale.pretty_print
+        from lale.pretty_print import json_to_string
 
-        sub = lale.pretty_print.json_to_string(self.sub)
-        sup = lale.pretty_print.json_to_string(self.sup)
+        sub = json_to_string(self.sub)
+        sup = json_to_string(self.sup)
         details = f"\n{self.sub_name} = {sub}\n{self.sup_name} = {sup}"
         return summary + details
 
@@ -276,12 +301,11 @@ def validate_schema(lhs: Any, super_schema: JSON_TYPE):
     from lale.settings import disable_data_schema_validation
 
     if disable_data_schema_validation:
-        return True  # If schema validation is disabled, always return as valid
+        return  # If schema validation is disabled, always return as valid
     sub_schema: Optional[JSON_TYPE]
-    import lale.datasets.data_schemas
 
     try:
-        sub_schema = lale.datasets.data_schemas.to_schema(lhs)
+        sub_schema = lale.datasets.data_schemas._to_schema(lhs)
     except ValueError:
         sub_schema = None
     if sub_schema is None:
@@ -341,7 +365,9 @@ def get_hyperparam_names(op: "lale.operators.IndividualOp") -> List[str]:
         return list(params.keys())
     else:
         c: Any = op.impl_class
-        return inspect.getargspec(c.__init__).args
+        sig = inspect.signature(c.__init__)
+        params = sig.parameters
+        return list(params.keys())
 
 
 def validate_method(op: "lale.operators.IndividualOp", schema_name: str):
@@ -477,20 +503,16 @@ def replace_data_constraints(
     hyperparam_schema: JSON_TYPE, data_schema: JSON_TYPE
 ) -> JSON_TYPE:
     @overload
-    def recursive_replace(subject: JSON_TYPE) -> JSON_TYPE:
-        ...
+    def recursive_replace(subject: JSON_TYPE) -> JSON_TYPE: ...
 
     @overload
-    def recursive_replace(subject: List) -> List:
-        ...
+    def recursive_replace(subject: List) -> List: ...
 
     @overload
-    def recursive_replace(subject: Tuple) -> Tuple:
-        ...
+    def recursive_replace(subject: Tuple) -> Tuple: ...
 
     @overload
-    def recursive_replace(subject: Any) -> Any:
-        ...
+    def recursive_replace(subject: Any) -> Any: ...
 
     def recursive_replace(subject):
         any_changes = False

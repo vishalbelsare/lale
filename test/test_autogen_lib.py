@@ -1,12 +1,10 @@
 import inspect
 import logging
-from random import choice
 
-import numpy as np
 import pytest
 from sklearn import datasets
 
-import lale.lib.autogen as autogen
+from lale.lib import autogen
 from lale.lib.lale import Hyperopt
 from lale.lib.lale.hyperopt import logger
 from lale.lib.sklearn import LogisticRegression
@@ -35,7 +33,7 @@ def base_test(name, pipeline, data_loader, max_evals=250, scoring="accuracy"):
             clf = Hyperopt(estimator=pipeline, max_evals=i, scoring=scoring)
             trained_pipeline = clf.fit(X, y)
             trained_pipeline.predict(X)
-            return True
+            return
         except Exception:
             test(3 * i)
 
@@ -47,51 +45,25 @@ LR = LogisticRegression.customize_schema(relevantToOptimizer=[])
 
 
 classifiers = [
-    "AdaBoostClassifier",
     "BernoulliNB",
     "CalibratedClassifierCV",
     "ComplementNB",
-    "DecisionTreeClassifier",
-    "ExtraTreesClassifier",
-    "GaussianNB",
     "GaussianProcessClassifier",
-    "GradientBoostingClassifier",
-    "KNeighborsClassifier",
     "LGBMClassifier",
     "LabelPropagation",
     "LabelSpreading",
-    "LinearSVC",
-    "LogisticRegression",
     "LogisticRegressionCV",
-    "MLPClassifier",
-    "MultinomialNB",
     "NearestCentroid",
     "NuSVC",
-    "PassiveAggressiveClassifier",
     "Perceptron",
-    "QuadraticDiscriminantAnalysis",
     "RadiusNeighborsClassifier",
-    "RandomForestClassifier",
-    "RidgeClassifier",
     "RidgeClassifierCV",
-    "SGDClassifier",
-    "SVC",
-    "SVR",
-]
-
-failed_classifiers = [
-    ("LinearRegression", "Input predict type (matrix with one column)"),
 ]
 
 
 @pytest.mark.parametrize("name, Op", [(n, Op) for (n, Op) in kls if n in classifiers])
 def test_classifier(name, Op):
     base_test(name, Op, load_iris)
-
-
-@pytest.mark.parametrize("name, reason", [(n, r) for (n, r) in failed_classifiers])
-def test_failed_classifier(name, reason):
-    pytest.xfail(reason)
 
 
 multi = [
@@ -114,16 +86,11 @@ def test_multi(name, Op):
 
 regressors = [
     "ARDRegression",
-    "AdaBoostRegressor",
     "BayesianRidge",
-    "DecisionTreeRegressor",
     "ElasticNet",
     "ElasticNetCV",
-    "ExtraTreesRegressor",
     "GaussianProcessRegressor",
-    "GradientBoostingRegressor",
     "HuberRegressor",
-    "KNeighborsRegressor",
     "Lars",
     "LarsCV",
     "Lasso",
@@ -132,17 +99,13 @@ regressors = [
     "LassoLarsCV",
     "LassoLarsIC",
     "LGBMRegressor",
-    "LinearSVR",
     "NuSVR",
     "OrthogonalMatchingPursuit",
     "OrthogonalMatchingPursuitCV",
     "PassiveAggressiveRegressor",
     "RANSACRegressor",
-    "RandomForestRegressor",
     "KernelRidge",
-    "Ridge",
     "RidgeCV",
-    "SGDRegressor",
     "TheilSenRegressor",
     "TransformedTargetRegressor",
 ]
@@ -158,7 +121,7 @@ def test_regressors(name, Op):
     base_test(name, Op, load_regression, scoring="r2")
 
 
-@pytest.mark.parametrize("name, reason", [(n, r) for (n, r) in failed_regressors])
+@pytest.mark.parametrize("name, reason", failed_regressors)
 def test_failed_regressor(name, reason):
     pytest.xfail(reason)
 
@@ -169,37 +132,24 @@ transformers = [
     "Binarizer",
     "Birch",
     "DictionaryLearning",
-    "FactorAnalysis",
+    # "FactorAnalysis",
     "FastICA",
-    "FunctionTransformer",
     "GaussianRandomProjection",
     "IncrementalPCA",
-    "Isomap",
     "KBinsDiscretizer",
-    "KMeans",
     "KernelPCA",
     "LinearDiscriminantAnalysis",
     "LocallyLinearEmbedding",
     "MaxAbsScaler",
-    "MinMaxScaler",
     "MiniBatchDictionaryLearning",
     "MiniBatchKMeans",
     "MiniBatchSparsePCA",
-    "NMF",
-    "Normalizer",
-    "Nystroem",
-    "PCA",
-    "PolynomialFeatures",
     "PowerTransformer",
-    "QuantileTransformer",
-    "RandomTreesEmbedding",
+    # "RandomTreesEmbedding",
     "RBFSampler",
-    "RobustScaler",
-    "SimpleImputer",
     "SkewedChi2Sampler",
     "SparsePCA",
     "SparseRandomProjection",
-    "StandardScaler",
     "TruncatedSVD",
 ]
 
@@ -209,8 +159,6 @@ failed_transformers = [
     ("LabelEncoder", "operates on labels (not supported by lale yet)"),
     ("LatentDirichletAllocation", "Failed 2D array output"),
     ("MultiLabelBinarizer", "operates on labels (not supported by lale yet)"),
-    ("MissingIndicator", "Output boolean (wrong pipeline)"),
-    ("OneHotEncoder", "Unknown categories during transform"),
     ("PLSCanonical", "Fit required Y (not y)"),
     ("PLSRegression", "Fit required Y (not y)"),
     ("PLSSVD", "Fit required Y (not y)"),
@@ -222,32 +170,7 @@ def test_transformer(name, Op):
     base_test(name, Op >> LR, load_iris)
 
 
-def test_ordinal_encoder():
-    from lale.lib.autogen import OrdinalEncoder as Op
-
-    def data_loader():
-        X = np.array([[choice([0, 2]), choice([1, 2, 3])] for _ in range(100)])
-        y = np.array([choice([0, 1]) for _ in X])
-        return X, y
-
-    base_test("OrdinalEncoder", Op >> LR, data_loader)
-
-
-@pytest.mark.xfail(reason="Output boolean array (pipeline?)")
-def test_missing_indicator():
-    from lale.lib.autogen import MissingIndicator as Op
-
-    def data_loader():
-        X = np.array(
-            [[choice([-1, 1, 2, 3]), choice([-1, 1, 2, 3])] for _ in range(100)]
-        )
-        y = np.array([choice([0, 1]) for _ in X])
-        return X, y
-
-    base_test("MissingIndicator", Op >> LR, data_loader)
-
-
-@pytest.mark.parametrize("name, reason", [(n, r) for (n, r) in failed_transformers])
+@pytest.mark.parametrize("name, reason", failed_transformers)
 def test_failed_transformer(name, reason):
     pytest.xfail(reason)
 

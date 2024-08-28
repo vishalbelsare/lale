@@ -52,18 +52,20 @@ def get_parameter_grids(
     num_samples: Optional[int] = None,
     num_grids: Optional[float] = None,
     pgo: Optional[PGO] = None,
-    data_schema: Dict[str, Any] = {},
+    data_schema: Optional[Dict[str, Any]] = None,
 ):
     """
     Parameters
     ----------
     op : The lale PlannedOperator
-    lale_num_samples : integer, optional
+    num_samples : integer, optional
         If set, will limit the number of samples for each distribution
-    lale_num_grids: integer or float, optional
+    num_grids: integer or float, optional
         if set to an integer => 1, it will determine how many parameter grids will be returned (at most)
         if set to an float between 0 and 1, it will determine what fraction should be returned
         note that setting it to 1 is treated as in integer.  To return all results, use None
+    pgo: Optional profile guided optimization data that guides discretization
+    data_schema: Optional schema for the input data. which is used for hyperparameter schema data constraints
     """
     return get_grid_search_parameter_grids(
         op,
@@ -79,7 +81,7 @@ def get_grid_search_parameter_grids(
     num_samples: Optional[int] = None,
     num_grids: Optional[float] = None,
     pgo: Optional[PGO] = None,
-    data_schema: Dict[str, Any] = {},
+    data_schema: Optional[Dict[str, Any]] = None,
 ) -> List[Dict[str, List[Any]]]:
     """Top level function: given a lale operator, returns a list of parameter grids
     suitable for passing to GridSearchCV.
@@ -128,14 +130,14 @@ def SearchSpaceNumberToGSValues(
         raise ValueError(
             f"maximum not specified for a number with distribution {dist} for {key}"
         )
-    max = hp.getInclusiveMax()
-    assert max is not None
+    space_max = hp.getInclusiveMax()
+    assert space_max is not None
     if hp.minimum is None:
         raise ValueError(
             f"minimum not specified for a number with distribution {dist} for {key}"
         )
-    min = hp.getInclusiveMin()
-    assert min is not None
+    space_min = hp.getInclusiveMin()
+    assert space_min is not None
 
     dt: np.dtype
     if hp.discrete:
@@ -150,10 +152,10 @@ def SearchSpaceNumberToGSValues(
         if samples <= 1:
             return [default]
         samples = samples - 1
-    if dist == "uniform" or dist == "integer":
-        ret = np.linspace(min, max, num=samples, dtype=dt).tolist()
+    if dist in ["uniform", "integer"]:
+        ret = np.linspace(space_min, space_max, num=samples, dtype=dt).tolist()
     elif dist == "loguniform":
-        ret = np.logspace(min, max, num=samples, dtype=dt).tolist()
+        ret = np.logspace(space_min, space_max, num=samples, dtype=dt).tolist()
     else:
         raise ValueError(f"unknown/unsupported distribution {dist} for {key}")
     if default is not None:

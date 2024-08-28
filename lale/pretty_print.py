@@ -1,4 +1,4 @@
-# Copyright 2019 IBM Corporation
+# Copyright 2019-2022 IBM Corporation
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -14,7 +14,6 @@
 
 import ast
 import importlib
-import json
 import keyword
 import logging
 import math
@@ -27,6 +26,7 @@ import numpy as np
 import sklearn.metrics
 
 import lale.expressions
+import lale.helpers
 import lale.json_operator
 import lale.operators
 import lale.type_checking
@@ -40,17 +40,24 @@ _black78 = black.FileMode(line_length=78)
 class _CodeGenState:
     imports: List[str]
     assigns: List[str]
-    _names: Set[str]
+    external_wrapper_modules: List[str]
 
     def __init__(
-        self, names: Set[str], combinators: bool, customize_schema: bool, astype: str
+        self,
+        names: Set[str],
+        combinators: bool,
+        assign_nested: bool,
+        customize_schema: bool,
+        astype: str,
     ):
         self.imports = []
         self.assigns = []
+        self.external_wrapper_modules = []
         self.combinators = combinators
+        self.assign_nested = assign_nested
         self.customize_schema = customize_schema
         self.astype = astype
-        self._names = (
+        self.gensym = lale.helpers.GenSym(
             {
                 "make_pipeline_graph",
                 "lale",
@@ -66,20 +73,11 @@ class _CodeGenState:
             | names
         )
 
-    def gensym(self, prefix: str) -> str:
-        if prefix in self._names:
-            suffix = 0
-            while f"{prefix}_{suffix}" in self._names:
-                suffix += 1
-            result = f"{prefix}_{suffix}"
-        else:
-            result = prefix
-        self._names |= {result}
-        return result
-
 
 def hyperparams_to_string(
-    hps: JSON_TYPE, steps: Optional[Dict[str, str]] = None, gen: _CodeGenState = None
+    hps: JSON_TYPE,
+    steps: Optional[Dict[str, str]] = None,
+    gen: Optional[_CodeGenState] = None,
 ) -> str:
     def sklearn_module(value):
         module = value.__module__
@@ -110,11 +108,11 @@ def hyperparams_to_string(
         elif isinstance(value, np.dtype):
             if gen is not None:
                 gen.imports.append("import numpy as np")
-            return f"np.{value.__repr__()}"
+            return f"np.{repr(value)}"
         elif isinstance(value, np.ndarray):
             if gen is not None:
                 gen.imports.append("import numpy as np")
-            array_expr = f"np.{value.__repr__()}"
+            array_expr = f"np.{repr(value)}"
             # For an array string representation, numpy includes dtype for some data types
             # we need to insert "np." for the dtype so that executing the pretty printed code
             # does not give any error for the dtype. The following code manipulates the
@@ -131,7 +129,7 @@ def hyperparams_to_string(
             return f"np.{value.__name__}"  # type: ignore
         elif isinstance(value, lale.expressions.Expr):
             v: lale.expressions.Expr = value
-            e = v._expr
+            e = v.expr
             if gen is not None:
                 gen.imports.append("from lale.expressions import it")
                 for node in ast.walk(e):
@@ -189,7 +187,7 @@ def hyperparams_to_string(
                         gen.imports.append(f"import {module}")
                     printed = f"{module}.{printed}"
             if printed.startswith("<"):
-                m = re.match(r"<(\w[\w.]*)\.(\w+) object at 0x[0-9a-f]+>$", printed)
+                m = re.match(r"<(\w[\w.]*)\.(\w+) object at 0x[0-9a-fA-F]+>$", printed)
                 if m:
                     module, clazz = m.group(1), m.group(2)
                     if gen is not None:
@@ -252,6 +250,26 @@ def _get_module_name(op_label: str, op_name: str, class_name: str) -> str:
     return mod
 
 
+def _get_wrapper_module_if_external(impl_class_name):
+    # If the lale operator was not found in the list of libraries registered with
+    # lale, return the operator's i.e. wrapper's module name
+    # This is pass to `wrap_imported_operators` in the output of `pretty_print`.
+    impl_name = impl_class_name[impl_class_name.rfind(".") + 1 :]
+    impl_module_name = impl_class_name[: impl_class_name.rfind(".")]
+    module = importlib.import_module(impl_module_name)
+    if hasattr(module, impl_name):
+        wrapped_model = getattr(module, impl_name)
+        wrapper = lale.operators.get_op_from_lale_lib(wrapped_model)
+        if wrapper is None:
+            # TODO: The assumption here is that the operator is created in the same
+            # module as where the impl is defined.
+            # Do we have a better way to know where `make_operator` is called from instead?
+            return impl_module_name
+        else:
+            return None
+    return None
+
+
 def _op_kind(op: JSON_TYPE) -> str:
     assert isinstance(op, dict)
     if "kind" in op:
@@ -275,7 +293,7 @@ def _introduce_structure(pipeline: JSON_TYPE, gen: _CodeGenState) -> JSON_TYPE:
         steps = pipeline["steps"]
         preds: Dict[str, List[str]] = {step: [] for step in steps}
         succs: Dict[str, List[str]] = {step: [] for step in steps}
-        for (src, dst) in pipeline["edges"]:
+        for src, dst in pipeline["edges"]:
             preds[dst].append(src)
             succs[src].append(dst)
         return {"kind": "Graph", "steps": steps, "preds": preds, "succs": succs}
@@ -309,7 +327,7 @@ def _introduce_structure(pipeline: JSON_TYPE, gen: _CodeGenState) -> JSON_TYPE:
         graph: JSON_TYPE,
     ) -> Optional[Tuple[Dict[str, JSON_TYPE], Dict[str, JSON_TYPE]]]:
         step_uids = list(graph["steps"].keys())
-        for i0 in range(len(step_uids)):
+        for i0 in range(len(step_uids)):  # pylint:disable=consider-using-enumerate
             for i1 in range(i0 + 1, len(step_uids)):
                 s0, s1 = step_uids[i0], step_uids[i1]
                 preds0, preds1 = graph["preds"][s0], graph["preds"][s1]
@@ -339,7 +357,7 @@ def _introduce_structure(pipeline: JSON_TYPE, gen: _CodeGenState) -> JSON_TYPE:
     def find_union(
         graph: JSON_TYPE,
     ) -> Optional[Tuple[Dict[str, JSON_TYPE], Dict[str, JSON_TYPE]]]:
-        cat_cls = "lale.lib.lale.concat_features._ConcatFeaturesImpl"
+        cat_cls = "lale.lib.rasl.concat_features._ConcatFeaturesImpl"
         for seq_uid, seq_jsn in graph["steps"].items():
             if _op_kind(seq_jsn) == "Seq":
                 seq_uids = list(seq_jsn["steps"].keys())
@@ -405,6 +423,8 @@ def _introduce_structure(pipeline: JSON_TYPE, gen: _CodeGenState) -> JSON_TYPE:
         return result
 
     def find_and_replace(graph: JSON_TYPE) -> JSON_TYPE:
+        if len(graph["steps"]) == 1:  # singleton
+            return {"kind": "Seq", "steps": graph["steps"]}
         progress = True
         while progress:
             seq = find_seq(graph)
@@ -445,17 +465,15 @@ def _operator_jsn_to_string_rec(uid: str, jsn: JSON_TYPE, gen: _CodeGenState) ->
                 gen.assigns.append(f"{step_uid} = {expr}")
         make_pipeline = "make_pipeline_graph"
         gen.imports.append(f"from lale.operators import {make_pipeline}")
-        result = "{}(steps=[{}], edges=[{}])".format(
-            make_pipeline,
-            ", ".join([step2name[step] for step in steps]),
-            ", ".join(
-                [
-                    f"({step2name[src]},{step2name[tgt]})"
-                    for src in steps
-                    for tgt in succs[src]
-                ]
-            ),
+        steps_string = ", ".join([step2name[step] for step in steps])
+        edges_string = ", ".join(
+            [
+                f"({step2name[src]},{step2name[tgt]})"
+                for src in steps
+                for tgt in succs[src]
+            ]
         )
+        result = f"{make_pipeline}(steps=[{steps_string}], edges=[{edges_string}])"
         return result
     elif _op_kind(jsn) in ["Seq", "Par", "OperatorChoice", "Union"]:
         if gen.combinators:
@@ -474,6 +492,10 @@ def _operator_jsn_to_string_rec(uid: str, jsn: JSON_TYPE, gen: _CodeGenState) ->
                 for step_uid, step_val in jsn["steps"].items()
             }
             combinator = _OP_KIND_TO_COMBINATOR[_op_kind(jsn)]
+            if len(printed_steps.values()) == 1 and combinator == ">>":
+                gen.imports.append("from lale.operators import make_pipeline")
+                op_expr = f"make_pipeline({', '.join(printed_steps.values())})"
+                return op_expr
             return f" {combinator} ".join(printed_steps.values())
         else:
             printed_steps = {
@@ -485,7 +507,7 @@ def _operator_jsn_to_string_rec(uid: str, jsn: JSON_TYPE, gen: _CodeGenState) ->
                 gen.imports.append(f"from sklearn.pipeline import {function}")
             else:
                 gen.imports.append(f"from lale.operators import {function}")
-            op_expr = "{}({})".format(function, ", ".join(printed_steps.values()))
+            op_expr = f"{function}({', '.join(printed_steps.values())})"
             gen.assigns.append(f"{uid} = {op_expr}")
             return uid
     elif _op_kind(jsn) == "IndividualOp":
@@ -504,7 +526,11 @@ def _operator_jsn_to_string_rec(uid: str, jsn: JSON_TYPE, gen: _CodeGenState) ->
             import_stmt = f"from {module_name} import {op_name}"
         else:
             import_stmt = f"from {module_name} import {op_name} as {label}"
-        gen.imports.append(import_stmt)
+        if module_name != "__main__":
+            gen.imports.append(import_stmt)
+            external_module_name = _get_wrapper_module_if_external(class_name)
+            if external_module_name is not None:
+                gen.external_wrapper_modules.append(external_module_name)
         printed_steps = {
             step_uid: _operator_jsn_to_string_rec(step_uid, step_val, gen)
             for step_uid, step_val in jsn.get("steps", {}).items()
@@ -514,9 +540,9 @@ def _operator_jsn_to_string_rec(uid: str, jsn: JSON_TYPE, gen: _CodeGenState) ->
             if jsn["customize_schema"] == "not_available":
                 logger.warning(f"missing {label}.customize_schema(..) call")
             elif jsn["customize_schema"] != {}:
-                new_hps = jsn["customize_schema"]["properties"]["hyperparams"]["allOf"][
-                    0
-                ]
+                new_hps = lale.json_operator._top_schemas_to_hp_props(
+                    jsn["customize_schema"]
+                )
                 customize_schema_string = ",".join(
                     [
                         f"{hp_name}={json_to_string(hp_schema)}"
@@ -527,7 +553,7 @@ def _operator_jsn_to_string_rec(uid: str, jsn: JSON_TYPE, gen: _CodeGenState) ->
         if "hyperparams" in jsn and jsn["hyperparams"] is not None:
             hp_string = hyperparams_to_string(jsn["hyperparams"], printed_steps, gen)
             op_expr = f"{op_expr}({hp_string})"
-        if re.fullmatch(r".+\(.+\)", op_expr):
+        if gen.assign_nested and re.fullmatch(r".+\(.+\)", op_expr):
             gen.assigns.append(f"{uid} = {op_expr}")
             return uid
         else:
@@ -554,7 +580,7 @@ def _combine_lonely_literals(printed_code):
     regex = re.compile(
         r' +("[^"]*"|\d+\.?\d*|\[\]|float\("nan"\)|np\.dtype\("[^"]+"\)),'
     )
-    for i in range(len(lines)):
+    for i in range(len(lines)):  # pylint:disable=consider-using-enumerate
         if lines[i] is not None:
             match_i = regex.fullmatch(lines[i])
             if match_i is not None:
@@ -583,10 +609,13 @@ def _operator_jsn_to_string(
     jsn: JSON_TYPE,
     show_imports: bool,
     combinators: bool,
+    assign_nested: bool,
     customize_schema: bool,
     astype: str,
 ) -> str:
-    gen = _CodeGenState(_collect_names(jsn), combinators, customize_schema, astype)
+    gen = _CodeGenState(
+        _collect_names(jsn), combinators, assign_nested, customize_schema, astype
+    )
     expr = _operator_jsn_to_string_rec("pipeline", jsn, gen)
     if expr != "pipeline":
         gen.assigns.append(f"pipeline = {expr}")
@@ -600,8 +629,19 @@ def _operator_jsn_to_string(
                 imports_set |= {imp}
                 imports_list.append(imp)
         result = "\n".join(imports_list)
+        external_wrapper_modules_set: Set[str] = set()
+        external_wrapper_modules_list: List[str] = []
+        for module in gen.external_wrapper_modules:
+            if module not in external_wrapper_modules_set:
+                external_wrapper_modules_set |= {module}
+                external_wrapper_modules_list.append(module)
         if combinators:
-            result += "\nlale.wrap_imported_operators()"
+            if len(external_wrapper_modules_list) > 0:
+                result += (
+                    f"\nlale.wrap_imported_operators({external_wrapper_modules_list})"
+                )
+            else:
+                result += "\nlale.wrap_imported_operators()"
         result += "\n"
         result += "\n".join(gen.assigns)
     else:
@@ -610,16 +650,40 @@ def _operator_jsn_to_string(
     return formatted
 
 
-def json_to_string(schema: JSON_TYPE) -> str:
-    s1 = json.dumps(schema, default=lambda o: f"<<{type(o).__qualname__}>>")
+def json_to_string(jsn: JSON_TYPE) -> str:
+    def _inner(value):
+        if value is None:
+            return "None"
+        elif isinstance(value, (bool, str)):
+            return pprint.pformat(value, width=10000, compact=True)
+        elif isinstance(value, (int, float)):
+            if math.isnan(value):
+                return "float('nan')"
+            else:
+                return pprint.pformat(value, width=10000, compact=True)
+        elif isinstance(value, list):
+            sl = [_inner(v) for v in value]
+            return "[" + ", ".join(sl) + "]"
+        elif isinstance(value, tuple):
+            sl = [_inner(v) for v in value]
+            return "(" + ", ".join(sl) + ")"
+        elif isinstance(value, dict):
+            sl = [f"'{k}': {_inner(v)}" for k, v in value.items()]
+            return "{" + ", ".join(sl) + "}"
+        else:
+            return f"<<{type(value).__qualname__}>>"
+
+    s1 = _inner(jsn)
     s2 = _format_code(s1)
     return s2
 
 
 def to_string(
     arg: Union[JSON_TYPE, "lale.operators.Operator"],
+    *,
     show_imports: bool = True,
     combinators: bool = True,
+    assign_nested: bool = True,
     customize_schema: bool = False,
     astype: str = "lale",
     call_depth: int = 1,
@@ -630,9 +694,18 @@ def to_string(
     if lale.type_checking.is_schema(arg):
         return json_to_string(cast(JSON_TYPE, arg))
     elif isinstance(arg, lale.operators.Operator):
-        jsn = lale.json_operator.to_json(arg, call_depth=call_depth + 1)
+        jsn = lale.json_operator.to_json(
+            arg,
+            call_depth=call_depth + 1,
+            add_custom_default=not customize_schema,
+        )
         return _operator_jsn_to_string(
-            jsn, show_imports, combinators, customize_schema, astype
+            jsn,
+            show_imports,
+            combinators,
+            assign_nested,
+            customize_schema,
+            astype,
         )
     else:
         raise ValueError(f"Unexpected argument type {type(arg)} for {arg}")
@@ -640,11 +713,19 @@ def to_string(
 
 def ipython_display(
     arg: Union[JSON_TYPE, "lale.operators.Operator"],
+    *,
     show_imports: bool = True,
     combinators: bool = True,
+    assign_nested: bool = True,
 ):
     import IPython.display
 
-    pretty_printed = to_string(arg, show_imports, combinators, call_depth=3)
+    pretty_printed = to_string(
+        arg,
+        show_imports=show_imports,
+        combinators=combinators,
+        assign_nested=assign_nested,
+        call_depth=3,
+    )
     markdown = IPython.display.Markdown(f"```python\n{pretty_printed}\n```")
     IPython.display.display(markdown)

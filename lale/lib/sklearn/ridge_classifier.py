@@ -14,6 +14,7 @@
 
 import sklearn
 import sklearn.linear_model
+from packaging import version
 
 import lale.docstrings
 import lale.operators
@@ -90,7 +91,6 @@ _hyperparams_schema = {
                     "type": "number",
                     "minimumForOptimizer": 1e-08,
                     "maximumForOptimizer": 0.01,
-                    "distribution": "loguniform",
                     "default": 0.001,
                     "description": "Precision of the solution.",
                 },
@@ -258,7 +258,7 @@ RidgeClassifier = lale.operators.make_operator(
     sklearn.linear_model.RidgeClassifier, _combined_schemas
 )
 
-if sklearn.__version__ >= "1.0":
+if lale.operators.sklearn_version >= version.Version("1.0"):
     # old: https://scikit-learn.org/0.24/modules/generated/sklearn.linear_model.RidgeClassifier.html
     # new: https://scikit-learn.org/1.0/modules/generated/sklearn.linear_model.RidgeClassifier.html
     from lale.schemas import Bool
@@ -280,6 +280,21 @@ If you wish to standardize, please use StandardScaler before calling fit on an e
             forOptimizer=False,
         ),
         set_as_available=True,
+    )
+
+if lale.operators.sklearn_version >= version.Version("1.2"):
+    # old: https://scikit-learn.org/1.1/modules/generated/sklearn.linear_model.Ridge.html
+    # new: https://scikit-learn.org/1.2/modules/generated/sklearn.linear_model.Ridge.html
+
+    RidgeClassifier = RidgeClassifier.customize_schema(
+        tol={
+            "type": "number",
+            "minimumForOptimizer": 1e-08,
+            "maximumForOptimizer": 0.01,
+            "default": 0.0001,
+            "description": "Precision of the solution.",
+        },
+        normalize=None,
     )
 
 lale.docstrings.set_docstrings(RidgeClassifier)

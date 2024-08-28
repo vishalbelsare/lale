@@ -1,8 +1,10 @@
 from numpy import inf, nan
+from packaging import version
 from sklearn.linear_model import BayesianRidge as Op
 
+import lale
 from lale.docstrings import set_docstrings
-from lale.operators import make_operator
+from lale.operators import make_operator, sklearn_version
 
 
 class _BayesianRidgeImpl:
@@ -62,7 +64,6 @@ _hyperparams_schema = {
                     "type": "number",
                     "minimumForOptimizer": 1e-08,
                     "maximumForOptimizer": 0.01,
-                    "distribution": "loguniform",
                     "default": 0.001,
                     "description": "Stop the algorithm if w has converged",
                 },
@@ -176,5 +177,54 @@ _combined_schemas = {
     },
 }
 BayesianRidge = make_operator(_BayesianRidgeImpl, _combined_schemas)
+
+if sklearn_version >= version.Version("1.2"):
+    # new: "https://scikit-learn.org/1.2/modules/generated/sklearn.linear_model.BayesianRidge#sklearn-linear_model-bayesianridge"
+
+    BayesianRidge = BayesianRidge.customize_schema(
+        normalize=None,
+        set_as_available=True,
+    )
+
+if sklearn_version >= version.Version("1.3"):
+
+    BayesianRidge = BayesianRidge.customize_schema(
+        n_iter={
+            "anyOf": [
+                {
+                    "type": "integer",
+                    "minimumForOptimizer": 5,
+                    "maximumForOptimizer": 1000,
+                    "distribution": "uniform",
+                    "default": 300,
+                    "description": "Maximum number of iterations",
+                },
+                {"enum": ["deprecated"]},
+            ],
+            "default": "deprecated",
+            "description": "Deprecated. Use `max_iter` instead.",
+        },
+        max_iter={
+            "anyOf": [
+                {
+                    "type": "integer",
+                    "minimumForOptimizer": 5,
+                    "maximumForOptimizer": 1000,
+                    "distribution": "uniform",
+                },
+                {"enum": [None], "description": "Corresponds to 300"},
+            ],
+            "description": "Maximum number of iterations",
+            "default": None,
+        },
+        set_as_available=True,
+    )
+
+if sklearn_version >= version.Version("1.5"):
+
+    BayesianRidge = BayesianRidge.customize_schema(
+        n_iter=None,
+        set_as_available=True,
+    )
 
 set_docstrings(BayesianRidge)

@@ -12,18 +12,35 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import sys
+import tempfile
 import unittest
 import warnings
 from test import EnableSchemaValidation
 
 import jsonschema
 import numpy as np
-import sklearn.datasets
+import pandas as pd
+from packaging import version
+from sklearn.datasets import load_iris
+from sklearn.metrics import accuracy_score, make_scorer
+from sklearn.model_selection import train_test_split
 
-import lale.schemas as schemas
-from lale.lib.lale import SMAC, ConcatFeatures, GridSearchCV, Hyperopt, NoOp
+from lale import schemas
+from lale.helpers import get_sklearn_estimator_name, with_fixed_estimator_name
+from lale.lib.lale import (
+    SMAC,
+    ConcatFeatures,
+    GridSearchCV,
+    Hyperopt,
+    NoOp,
+    OptimizeLast,
+    Project,
+    TopKVotingClassifier,
+)
 from lale.lib.sklearn import (
     PCA,
+    SVC,
     KNeighborsClassifier,
     KNeighborsRegressor,
     LinearRegression,
@@ -32,16 +49,20 @@ from lale.lib.sklearn import (
     Normalizer,
     Nystroem,
     OneHotEncoder,
+    RandomForestClassifier,
+    RandomForestRegressor,
     SimpleImputer,
     StandardScaler,
+    TfidfVectorizer,
 )
+from lale.operators import TrainedIndividualOp, TrainedPipeline, sklearn_version
 from lale.search.lale_smac import get_smac_space, lale_op_smac_tae
 from lale.search.op2hp import hyperopt_search_space
 
+from .mock_custom_operators import OpThatWorksWithFiles
+
 
 def f_min(op, X, y, num_folds=5):
-    import numpy as np
-
     from lale.helpers import cross_val_score
 
     # try:
@@ -68,26 +89,22 @@ def iris_fmin_tae(op, num_folds=5):
     return lale_op_smac_tae(op, iris_f_min_for_folds(num_folds=num_folds))
 
 
+@unittest.skipIf(
+    sys.version_info >= (3, 11),
+    "SMAC interface is not currently supported with newer version of Python",
+)
 class TestSMAC(unittest.TestCase):
     def setUp(self):
-        from sklearn.datasets import load_iris
-        from sklearn.model_selection import train_test_split
-
         X, y = load_iris(return_X_y=True)
         self.X_train, self.X_test, self.y_train, self.y_test = train_test_split(X, y)
 
     def test_smac(self):
-
-        import numpy as np
-
         # Import ConfigSpace and different types of parameters
         from smac.configspace import ConfigurationSpace
         from smac.facade.smac_facade import SMAC as orig_SMAC
         from smac.scenario.scenario import Scenario
 
         # Import SMAC-utilities
-        from lale.search.lale_smac import get_smac_space
-
         lr = LogisticRegression()
 
         cs: ConfigurationSpace = get_smac_space(lr)
@@ -114,12 +131,9 @@ class TestSMAC(unittest.TestCase):
 
         inc_value = tae(incumbent)
 
-        print("Optimized Value: %.2f" % (inc_value))
+        print(f"Optimized Value: {inc_value:.2f}")
 
     def dont_test_smac_choice(self):
-
-        import numpy as np
-
         # Import ConfigSpace and different types of parameters
         from smac.configspace import ConfigurationSpace
         from smac.facade.smac_facade import SMAC as orig_SMAC
@@ -128,10 +142,13 @@ class TestSMAC(unittest.TestCase):
         # Import SMAC-utilities
 
         tfm = PCA() | Nystroem() | NoOp()
+        if sklearn_version >= version.Version("1.2"):
+            ohe = OneHotEncoder(handle_unknown="ignore", sparse_output=False)
+        else:
+            ohe = OneHotEncoder(handle_unknown="ignore", sparse=False)
+
         planned_pipeline1 = (
-            (OneHotEncoder(handle_unknown="ignore", sparse=False) | NoOp())
-            >> tfm
-            >> (LogisticRegression() | KNeighborsClassifier())
+            (ohe | NoOp()) >> tfm >> (LogisticRegression() | KNeighborsClassifier())
         )
 
         cs: ConfigurationSpace = get_smac_space(planned_pipeline1, lale_num_grids=1)
@@ -157,12 +174,9 @@ class TestSMAC(unittest.TestCase):
 
         inc_value = tae(incumbent)
 
-        print("Optimized Value: %.2f" % (inc_value))
+        print(f"Optimized Value: {inc_value:.2f}")
 
     def test_smac1(self):
-
-        from lale.lib.lale import SMAC
-
         planned_pipeline = (PCA | NoOp) >> LogisticRegression
         opt = SMAC(estimator=planned_pipeline, max_evals=1)
         # run optimizer
@@ -173,7 +187,6 @@ class TestSMAC(unittest.TestCase):
         from test.mock_module import BadClassifier
 
         import lale.operators
-        from lale.lib.lale import SMAC
 
         BadClf = lale.operators.make_operator(BadClassifier)
         planned_pipeline = (PCA | NoOp) >> BadClf()
@@ -186,8 +199,6 @@ class TestSMAC(unittest.TestCase):
         assert 2147483647.0 in trials.cost_per_config.values()
 
     def test_smac_timeout_zero_classification(self):
-        from lale.lib.lale import SMAC
-
         planned_pipeline = (MinMaxScaler | Normalizer) >> (
             LogisticRegression | KNeighborsClassifier
         )
@@ -197,10 +208,8 @@ class TestSMAC(unittest.TestCase):
         assert res.get_pipeline() is None
 
     def test_smac_timeout_zero_regression(self):
-        from lale.lib.lale import SMAC
-
         planned_pipeline = (MinMaxScaler | Normalizer) >> LinearRegression
-        from sklearn.datasets import load_boston
+        from lale.datasets.util import load_boston
 
         X, y = load_boston(return_X_y=True)
         opt = SMAC(
@@ -212,8 +221,6 @@ class TestSMAC(unittest.TestCase):
 
     def test_smac_timeout_classification(self):
         import time
-
-        from lale.lib.lale import SMAC
 
         planned_pipeline = (MinMaxScaler | Normalizer) >> (
             LogisticRegression | KNeighborsClassifier
@@ -228,16 +235,12 @@ class TestSMAC(unittest.TestCase):
         rel_diff = (opt_time - max_opt_time) / max_opt_time
         assert (
             rel_diff < 1.2
-        ), "Max time: {}, Actual time: {}, relative diff: {}".format(
-            max_opt_time, opt_time, rel_diff
-        )
+        ), f"Max time: {max_opt_time}, Actual time: {opt_time}, relative diff: {rel_diff}"
 
     def test_smac_timeout_regression(self):
         import time
 
-        from sklearn.datasets import load_boston
-
-        from lale.lib.lale import SMAC
+        from lale.datasets.util import load_boston
 
         planned_pipeline = (MinMaxScaler | Normalizer) >> LinearRegression
         X, y = load_boston(return_X_y=True)
@@ -256,18 +259,13 @@ class TestSMAC(unittest.TestCase):
         rel_diff = (opt_time - max_opt_time) / max_opt_time
         assert (
             rel_diff < 0.5
-        ), "Max time: {}, Actual time: {}, relative diff: {}".format(
-            max_opt_time, opt_time, rel_diff
-        )
+        ), f"Max time: {max_opt_time}, Actual time: {opt_time}, relative diff: {rel_diff}"
 
 
 def run_hyperopt_on_planned_pipeline(planned_pipeline, max_iters=1):
     # data
-    from sklearn.datasets import load_iris
-
     features, labels = load_iris(return_X_y=True)
     # set up optimizer
-    from lale.lib.lale.hyperopt import Hyperopt
 
     opt = Hyperopt(estimator=planned_pipeline, max_evals=max_iters)
     # run optimizer
@@ -340,15 +338,22 @@ class TestHyperoptOperatorDuplication(unittest.TestCase):
 
 class TestHyperopt(unittest.TestCase):
     def setUp(self):
-        from sklearn.datasets import load_iris
-        from sklearn.model_selection import train_test_split
-
         data = load_iris()
         X, y = data.data, data.target
         self.X_train, self.X_test, self.y_train, self.y_test = train_test_split(X, y)
 
-    def test_using_scoring(self):
+    def test_loguniform_search_space(self):
+        from lale.search.schema2search_space import op_to_search_space
+        from lale.search.search_space import SearchSpaceObject
 
+        svc = SVC()
+        space = op_to_search_space(svc)
+        self.assertIsInstance(space, SearchSpaceObject)
+        strobj = str(space)
+        self.assertRegex(strobj, r"gamma->\[[^[]*,<log>,8]")
+        pass
+
+    def test_using_scoring(self):
         lr = LogisticRegression()
         clf = Hyperopt(estimator=lr, scoring="accuracy", cv=5, max_evals=1)
         trained = clf.fit(self.X_train, self.y_train)
@@ -357,7 +362,7 @@ class TestHyperopt(unittest.TestCase):
         assert np.array_equal(predictions_1, predictions)
 
     def test_custom_scoring(self):
-        from sklearn.metrics import f1_score, make_scorer
+        from sklearn.metrics import f1_score
 
         lr = LogisticRegression()
         clf = Hyperopt(
@@ -377,8 +382,6 @@ class TestHyperopt(unittest.TestCase):
         planned_pipeline = (MinMaxScaler | Normalizer) >> (
             LogisticRegression | KNeighborsClassifier
         )
-        from sklearn.datasets import load_iris
-
         X, y = load_iris(return_X_y=True)
 
         max_opt_time = 10.0
@@ -396,16 +399,12 @@ class TestHyperopt(unittest.TestCase):
         rel_diff = (opt_time - max_opt_time) / max_opt_time
         assert (
             rel_diff < 0.7
-        ), "Max time: {}, Actual time: {}, relative diff: {}".format(
-            max_opt_time, opt_time, rel_diff
-        )
+        ), f"Max time: {max_opt_time}, Actual time: {opt_time}, relative diff: {rel_diff}"
 
     def test_runtime_limit_zero_time_hoc(self):
         planned_pipeline = (MinMaxScaler | Normalizer) >> (
             LogisticRegression | KNeighborsClassifier
         )
-        from sklearn.datasets import load_iris
-
         X, y = load_iris(return_X_y=True)
 
         hoc = Hyperopt(
@@ -422,7 +421,7 @@ class TestHyperopt(unittest.TestCase):
         import time
 
         planned_pipeline = (MinMaxScaler | Normalizer) >> LinearRegression
-        from sklearn.datasets import load_boston
+        from lale.datasets.util import load_boston
 
         X, y = load_boston(return_X_y=True)
 
@@ -441,13 +440,11 @@ class TestHyperopt(unittest.TestCase):
         rel_diff = (opt_time - max_opt_time) / max_opt_time
         assert (
             rel_diff < 0.2
-        ), "Max time: {}, Actual time: {}, relative diff: {}".format(
-            max_opt_time, opt_time, rel_diff
-        )
+        ), f"Max time: {max_opt_time}, Actual time: {opt_time}, relative diff: {rel_diff}"
 
     def test_runtime_limit_zero_time_hor(self):
         planned_pipeline = (MinMaxScaler | Normalizer) >> LinearRegression
-        from sklearn.datasets import load_boston
+        from lale.datasets.util import load_boston
 
         X, y = load_boston(return_X_y=True)
 
@@ -469,11 +466,6 @@ class TestHyperopt(unittest.TestCase):
         self.assertNotEqual(search_space1, search_space2)
 
     def test_nested_pipeline1(self):
-        from sklearn.datasets import load_iris
-        from sklearn.metrics import accuracy_score
-
-        from lale.lib.lale import Hyperopt
-
         data = load_iris()
         X, y = data.data, data.target
         # pipeline = KNeighborsClassifier() | (OneHotEncoder(handle_unknown = 'ignore') >> LogisticRegression())
@@ -484,14 +476,7 @@ class TestHyperopt(unittest.TestCase):
         print(accuracy_score(y, predictions))
 
     def test_with_concat_features1(self):
-        import warnings
-
         warnings.filterwarnings("ignore")
-
-        from sklearn.datasets import load_iris
-        from sklearn.metrics import accuracy_score
-
-        from lale.lib.lale import Hyperopt
 
         data = load_iris()
         X, y = data.data, data.target
@@ -507,14 +492,7 @@ class TestHyperopt(unittest.TestCase):
         warnings.resetwarnings()
 
     def test_with_concat_features2(self):
-        import warnings
-
         warnings.filterwarnings("ignore")
-
-        from sklearn.datasets import load_iris
-        from sklearn.metrics import accuracy_score
-
-        from lale.lib.lale import Hyperopt
 
         data = load_iris()
         X, y = data.data, data.target
@@ -537,57 +515,48 @@ class TestHyperopt(unittest.TestCase):
     def test_preprocessing_union(self):
         from lale.datasets import openml
 
-        (train_X, train_y), (test_X, test_y) = openml.fetch(
+        (train_X, train_y), (_test_X, _test_y) = openml.fetch(
             "credit-g", "classification", preprocess=False
         )
-        from lale.lib.lale import ConcatFeatures as Concat
-        from lale.lib.lale import Project
-        from lale.lib.sklearn import Normalizer, OneHotEncoder
-        from lale.lib.sklearn import RandomForestClassifier as Forest
 
         prep_num = Project(columns={"type": "number"}) >> Normalizer
-        prep_cat = Project(columns={"not": {"type": "number"}}) >> OneHotEncoder(
-            sparse=False
-        )
-        planned = (prep_num & prep_cat) >> Concat >> Forest
-        from lale.lib.lale import Hyperopt
+        if sklearn_version >= version.Version("1.2"):
+            ohe = OneHotEncoder(sparse_output=False)
+        else:
+            ohe = OneHotEncoder(sparse=False)
+
+        prep_cat = Project(columns={"not": {"type": "number"}}) >> ohe
+        planned = (prep_num & prep_cat) >> ConcatFeatures >> RandomForestClassifier
 
         hyperopt_classifier = Hyperopt(estimator=planned, max_evals=1)
         _ = hyperopt_classifier.fit(train_X, train_y)
 
     def test_text_and_structured(self):
-        from sklearn.model_selection import train_test_split
-
         from lale.datasets.uci.uci_datasets import fetch_drugscom
 
-        train_X_all, train_y_all, test_X, test_y = fetch_drugscom()
+        train_X_all, train_y_all, _test_X, _test_y = fetch_drugscom()
         # subset to speed up debugging
-        train_X, train_X_ignore, train_y, train_y_ignore = train_test_split(
+        train_X, _train_X, train_y, _train_y = train_test_split(
             train_X_all, train_y_all, train_size=0.01, random_state=42
         )
-        from lale.lib.lale import ConcatFeatures as Cat
-        from lale.lib.lale import Project
-        from lale.lib.sklearn import LinearRegression as LinReg
-        from lale.lib.sklearn import RandomForestRegressor as Forest
-        from lale.lib.sklearn import TfidfVectorizer as Tfidf
 
-        prep_text = Project(columns=["review"]) >> Tfidf(max_features=100)
+        prep_text = Project(columns=["review"]) >> TfidfVectorizer(max_features=100)
         prep_nums = Project(columns={"type": "number"})
-        planned = (prep_text & prep_nums) >> Cat >> (LinReg | Forest)
-        from lale.lib.lale import Hyperopt
+        planned = (
+            (prep_text & prep_nums)
+            >> ConcatFeatures
+            >> (LinearRegression | RandomForestRegressor)
+        )
 
         hyperopt_classifier = Hyperopt(estimator=planned, max_evals=1, scoring="r2")
         _ = hyperopt_classifier.fit(train_X, train_y)
 
     def test_custom_scorer(self):
-
         pipeline = PCA() >> LogisticRegression()
 
         def custom_scorer(estimator, X, y, factor=0.1):
             # This is a custom scorer for demonstrating the use of kwargs
             # Just applies some factor to the accuracy
-            from sklearn.metrics import accuracy_score
-
             predictions = estimator.predict(X)
             self.assertEqual(factor, 0.5)
             return factor * accuracy_score(y, predictions)
@@ -614,20 +583,70 @@ class TestHyperopt(unittest.TestCase):
             predictions_1 = hyperopt.predict(self.X_test)
             self.assertTrue(np.array_equal(predictions_1, predictions), alg)
 
+    def test_args_to_cv(self):
+        from sklearn.model_selection import GroupKFold
+
+        data = pd.DataFrame(
+            {
+                "x_0": ["a"] * 10 + ["b"] * 10,
+                "x_1": ["c"] * 18 + ["d"] * 2,
+                "y": [1, 1, 1, 1, 0, 1, 0, 0, 0, 0, 1, 1, 1, 1, 0, 1, 0, 0, 0, 0],
+            }
+        )
+        train_y = data.pop("y")
+        train_x = data
+        group_cols = train_x["x_0"]
+        group_cols = [col_value[0] for col_value in group_cols.tolist()]
+        group_kfold = GroupKFold(n_splits=2)
+        pipeline = OneHotEncoder(handle_unknown="ignore") >> RandomForestClassifier()
+        optimizer = Hyperopt(
+            estimator=pipeline, cv=group_kfold, max_evals=1, verbose=True
+        )
+        trained_optimizer = optimizer.fit(
+            train_x, train_y, args_to_cv={"groups": group_cols}
+        )
+        trained_optimizer.predict(train_x)
+
+    def test_string_X(self):
+        from sklearn.datasets import fetch_20newsgroups
+
+        cats = ["alt.atheism", "sci.space"]
+        newsgroups_train = fetch_20newsgroups(subset="train", categories=cats)
+        self.train_X, self.train_y = (
+            np.array(newsgroups_train.data),
+            newsgroups_train.target,
+        )
+        self.train_X = np.reshape(self.train_X, (self.train_X.shape[0], 1))
+        newsgroups_test = fetch_20newsgroups(subset="test", categories=cats)
+        self.test_X, self.test_y = (
+            np.array(newsgroups_test.data),
+            newsgroups_test.target,
+        )
+        self.test_X = np.reshape(self.test_X, (self.test_X.shape[0], 1))
+        op = OpThatWorksWithFiles()
+        optimizer = Hyperopt(estimator=op, cv=None, max_evals=2, verbose=True)
+        with tempfile.NamedTemporaryFile(mode="w") as tmp:
+            pd.DataFrame(self.train_X).to_csv(tmp.name, header=None, index=None)
+            # np.savetxt(tmp.name, self.train_X, fmt="%s")
+            with tempfile.NamedTemporaryFile(mode="w") as tmp1:
+                pd.DataFrame(self.test_X).to_csv(tmp1.name, header=None, index=None)
+                # np.savetxt(tmp1.name, self.test_X, fmt="%s")
+                _ = optimizer.fit(
+                    tmp.name,
+                    y=self.train_y,
+                    X_valid=tmp1.name,
+                    y_valid=self.test_y,
+                    sample_weight=[],
+                )
+
 
 class TestAutoConfigureClassification(unittest.TestCase):
     def setUp(self):
-        from sklearn.datasets import load_iris
-        from sklearn.model_selection import train_test_split
-
         data = load_iris()
         X, y = data.data, data.target
         self.X_train, self.X_test, self.y_train, self.y_test = train_test_split(X, y)
 
     def test_with_Hyperopt(self):
-        from lale.lib.lale import Hyperopt, NoOp
-        from lale.lib.sklearn import PCA, LogisticRegression
-
         planned_pipeline = (PCA | NoOp) >> LogisticRegression
         best_pipeline = planned_pipeline.auto_configure(
             self.X_train,
@@ -638,25 +657,16 @@ class TestAutoConfigureClassification(unittest.TestCase):
             max_evals=1,
         )
         _ = best_pipeline.predict(self.X_test)
-        from lale.operators import TrainedPipeline
-
         assert isinstance(best_pipeline, TrainedPipeline)
 
     def test_with_Hyperopt_2(self):
-        from lale.lib.lale import Hyperopt
-        from lale.lib.sklearn import KNeighborsClassifier as KNN
-        from lale.lib.sklearn import LogisticRegression as LR
-
-        choice = LR | KNN
+        choice = LogisticRegression | KNeighborsClassifier
         best = choice.auto_configure(
             self.X_train, self.y_train, optimizer=Hyperopt, cv=3, max_evals=3
         )
         _ = best.predict(self.X_test)
 
     def test_with_Hyperopt_3(self):
-        from lale.lib.lale import Hyperopt
-        from lale.lib.sklearn import PCA, LogisticRegression
-
         planned_pipeline = (PCA() | Nystroem()) >> (
             LogisticRegression() | KNeighborsClassifier()
         )
@@ -670,14 +680,9 @@ class TestAutoConfigureClassification(unittest.TestCase):
             frac_evals_with_defaults=0.2,
         )
         _ = best_pipeline.predict(self.X_test)
-        from lale.operators import TrainedPipeline
-
         assert isinstance(best_pipeline, TrainedPipeline)
 
     def test_with_gridsearchcv(self):
-        from lale.lib.lale import GridSearchCV, NoOp
-        from lale.lib.sklearn import PCA, LogisticRegression
-
         warnings.simplefilter("ignore")
         planned_pipeline = (PCA | NoOp) >> LogisticRegression
         best_pipeline = planned_pipeline.auto_configure(
@@ -692,10 +697,11 @@ class TestAutoConfigureClassification(unittest.TestCase):
         _ = best_pipeline.predict(self.X_test)
         assert best_pipeline is not None
 
+    @unittest.skipIf(
+        sys.version_info >= (3, 11),
+        "SMAC interface is not currently supported with newer version of Python",
+    )
     def test_with_smaccv(self):
-        from lale.lib.lale import SMAC, NoOp
-        from lale.lib.sklearn import PCA, LogisticRegression
-
         planned_pipeline = (PCA | NoOp) >> LogisticRegression
         best_pipeline = planned_pipeline.auto_configure(
             self.X_train,
@@ -706,22 +712,17 @@ class TestAutoConfigureClassification(unittest.TestCase):
             max_evals=1,
         )
         _ = best_pipeline.predict(self.X_test)
-        from lale.operators import TrainedPipeline
-
         assert isinstance(best_pipeline, TrainedPipeline)
 
 
 class TestAutoConfigureRegression(unittest.TestCase):
     def setUp(self):
-        from sklearn.datasets import load_boston
-        from sklearn.model_selection import train_test_split
+        from lale.datasets.util import load_boston
 
         X, y = load_boston(return_X_y=True)
         self.X_train, self.X_test, self.y_train, self.y_test = train_test_split(X, y)
 
     def test_with_Hyperopt(self):
-        from lale.lib.lale import Hyperopt
-
         planned_pipeline = (MinMaxScaler | Normalizer) >> LinearRegression
         best_pipeline = planned_pipeline.auto_configure(
             self.X_train,
@@ -732,13 +733,9 @@ class TestAutoConfigureRegression(unittest.TestCase):
             max_evals=1,
         )
         _ = best_pipeline.predict(self.X_test)
-        from lale.operators import TrainedPipeline
-
         assert isinstance(best_pipeline, TrainedPipeline)
 
     def test_with_gridsearchcv(self):
-        from lale.lib.lale import GridSearchCV
-
         warnings.simplefilter("ignore")
         planned_pipeline = (MinMaxScaler | Normalizer) >> LinearRegression
         best_pipeline = planned_pipeline.auto_configure(
@@ -756,11 +753,6 @@ class TestAutoConfigureRegression(unittest.TestCase):
 
 class TestGridSearchCV(unittest.TestCase):
     def test_manual_grid(self):
-        from sklearn.datasets import load_iris
-
-        from lale.lib.lale import GridSearchCV
-        from lale.lib.sklearn import SVC
-
         warnings.simplefilter("ignore")
 
         from lale import wrap_imported_operators
@@ -774,16 +766,12 @@ class TestGridSearchCV(unittest.TestCase):
         clf.predict(iris.data)
 
     def test_with_gridsearchcv_auto_wrapped_pipe1(self):
-        from sklearn.datasets import load_iris
-        from sklearn.metrics import accuracy_score, make_scorer
-
         lr = LogisticRegression()
         pca = PCA()
         trainable = pca >> lr
 
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
-            from lale.lib.lale import GridSearchCV
 
             clf = GridSearchCV(
                 estimator=trainable,
@@ -796,9 +784,6 @@ class TestGridSearchCV(unittest.TestCase):
             clf.fit(iris.data, iris.target)
 
     def test_with_gridsearchcv_auto_wrapped_pipe2(self):
-        from sklearn.datasets import load_iris
-        from sklearn.metrics import accuracy_score, make_scorer
-
         lr = LogisticRegression()
         pca1 = PCA()
         pca1._name = "PCA1"
@@ -808,7 +793,6 @@ class TestGridSearchCV(unittest.TestCase):
 
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
-            from lale.lib.lale import GridSearchCV
 
             clf = GridSearchCV(
                 estimator=trainable,
@@ -826,7 +810,6 @@ class TestGridSearchCV(unittest.TestCase):
         planned_pipeline = (MinMaxScaler | Normalizer) >> (
             LogisticRegression | KNeighborsClassifier
         )
-        from sklearn.datasets import load_iris
 
         X, y = load_iris(return_X_y=True)
 
@@ -845,19 +828,18 @@ class TestGridSearchCV(unittest.TestCase):
         rel_diff = (opt_time - max_opt_time) / max_opt_time
         assert (
             rel_diff < 0.7
-        ), "Max time: {}, Actual time: {}, relative diff: {}".format(
-            max_opt_time, opt_time, rel_diff
-        )
+        ), f"Max time: {max_opt_time}, Actual time: {opt_time}, relative diff: {rel_diff}"
 
+    @unittest.skip("This test has finicky timing")
     def test_runtime_limit_hor(self):
         import time
 
         planned_pipeline = (MinMaxScaler | Normalizer) >> LinearRegression
-        from sklearn.datasets import load_boston
+        from lale.datasets.util import load_boston
 
         X, y = load_boston(return_X_y=True)
 
-        max_opt_time = 3.0
+        max_opt_time = 3
         hor = GridSearchCV(
             estimator=planned_pipeline,
             cv=3,
@@ -869,18 +851,17 @@ class TestGridSearchCV(unittest.TestCase):
             _ = hor.fit(X[:500, :], y[:500])
         end = time.time()
         opt_time = end - start
+        print(opt_time)
         rel_diff = (opt_time - max_opt_time) / max_opt_time
         assert (
             rel_diff < 0.2
-        ), "Max time: {}, Actual time: {}, relative diff: {}".format(
-            max_opt_time, opt_time, rel_diff
-        )
+        ), f"Max time: {max_opt_time}, Actual time: {opt_time}, relative diff: {rel_diff}"
 
 
 class TestCrossValidation(unittest.TestCase):
     def test_cv_folds(self):
         trainable_lr = LogisticRegression(n_jobs=1)
-        iris = sklearn.datasets.load_iris()
+        iris = load_iris()
         from sklearn.model_selection import KFold
 
         from lale.helpers import cross_val_score
@@ -890,7 +871,7 @@ class TestCrossValidation(unittest.TestCase):
 
     def test_cv_scoring(self):
         trainable_lr = LogisticRegression(n_jobs=1)
-        iris = sklearn.datasets.load_iris()
+        iris = load_iris()
         from sklearn.metrics import confusion_matrix
 
         from lale.helpers import cross_val_score
@@ -902,8 +883,8 @@ class TestCrossValidation(unittest.TestCase):
 
     def test_cv_folds_scikit(self):
         trainable_lr = LogisticRegression(n_jobs=1)
-        iris = sklearn.datasets.load_iris()
-        from sklearn.metrics import accuracy_score, make_scorer
+        iris = load_iris()
+
         from sklearn.model_selection import KFold, cross_val_score
 
         with warnings.catch_warnings():
@@ -920,9 +901,6 @@ class TestCrossValidation(unittest.TestCase):
 
 class TestHigherOrderOperators(unittest.TestCase):
     def setUp(self):
-        from sklearn.datasets import load_iris
-        from sklearn.model_selection import train_test_split
-
         data = load_iris()
         X, y = data.data, data.target
         self.X_train, self.X_test, self.y_train, self.y_test = train_test_split(X, y)
@@ -930,26 +908,36 @@ class TestHigherOrderOperators(unittest.TestCase):
     def test_ada_boost(self):
         from lale.lib.sklearn import AdaBoostClassifier, DecisionTreeClassifier
 
-        clf = AdaBoostClassifier(base_estimator=DecisionTreeClassifier())
+        clf = AdaBoostClassifier(
+            **with_fixed_estimator_name(estimator=DecisionTreeClassifier())
+        )
         trained = clf.auto_configure(
             self.X_train, self.y_train, optimizer=Hyperopt, max_evals=1
         )
+
+        est_name = get_sklearn_estimator_name()
+
         # Checking that the inner decision tree does not get the default value for min_samples_leaf, not sure if this will always pass
         self.assertNotEqual(
-            trained.hyperparams()["base_estimator"].hyperparams()["min_samples_leaf"], 1
+            trained.hyperparams()[est_name].hyperparams()["min_samples_leaf"], 1
         )
 
     def test_ada_boost_pipe(self):
         from lale.lib.sklearn import AdaBoostClassifier, DecisionTreeClassifier
 
-        clf = AdaBoostClassifier(base_estimator=NoOp >> DecisionTreeClassifier())
+        clf = AdaBoostClassifier(
+            **with_fixed_estimator_name(estimator=NoOp >> DecisionTreeClassifier())
+        )
         trained = clf.auto_configure(
             self.X_train, self.y_train, optimizer=Hyperopt, max_evals=1
         )
+
+        est_name = get_sklearn_estimator_name()
+
         # Checking that the inner decision tree does not get the default value for min_samples_leaf, not sure if this will always pass
         self.assertNotEqual(
-            trained.hyperparams()["base_estimator"]
-            .steps()[1]
+            trained.hyperparams()[est_name]
+            .steps_list()[1]
             .hyperparams()["min_samples_leaf"],
             1,
         )
@@ -959,42 +947,52 @@ class TestHigherOrderOperators(unittest.TestCase):
 
         from lale.lib.sklearn import AdaBoostClassifier
 
-        clf = AdaBoostClassifier(base_estimator=DecisionTreeClassifier())
+        clf = AdaBoostClassifier(
+            **with_fixed_estimator_name(estimator=DecisionTreeClassifier())
+        )
         clf.fit(self.X_train, self.y_train)
 
     def test_ada_boost_regressor(self):
-        from sklearn.datasets import load_boston
-        from sklearn.model_selection import train_test_split
+        from lale.datasets.util import load_boston
 
         X, y = load_boston(return_X_y=True)
-        X_train, X_test, y_train, y_test = train_test_split(X, y)
+        X_train, _X_test, y_train, _y_test = train_test_split(X, y)
         from lale.lib.sklearn import AdaBoostRegressor, DecisionTreeRegressor
 
-        reg = AdaBoostRegressor(base_estimator=DecisionTreeRegressor())
+        reg = AdaBoostRegressor(
+            **with_fixed_estimator_name(estimator=DecisionTreeRegressor())
+        )
         trained = reg.auto_configure(
             X_train, y_train, optimizer=Hyperopt, max_evals=1, scoring="r2"
         )
+
+        est_name = get_sklearn_estimator_name()
+
         # Checking that the inner decision tree does not get the default value for min_samples_leaf, not sure if this will always pass
         self.assertNotEqual(
-            trained.hyperparams()["base_estimator"].hyperparams()["min_samples_leaf"], 1
+            trained.hyperparams()[est_name].hyperparams()["min_samples_leaf"], 1
         )
 
     def test_ada_boost_regressor_pipe(self):
-        from sklearn.datasets import load_boston
-        from sklearn.model_selection import train_test_split
+        from lale.datasets.util import load_boston
 
         X, y = load_boston(return_X_y=True)
-        X_train, X_test, y_train, y_test = train_test_split(X, y)
+        X_train, _X_test, y_train, _y_test = train_test_split(X, y)
         from lale.lib.sklearn import AdaBoostRegressor, DecisionTreeRegressor
 
-        reg = AdaBoostRegressor(base_estimator=NoOp >> DecisionTreeRegressor())
+        reg = AdaBoostRegressor(
+            **with_fixed_estimator_name(estimator=NoOp >> DecisionTreeRegressor())
+        )
         trained = reg.auto_configure(
             X_train, y_train, optimizer=Hyperopt, max_evals=1, scoring="r2"
         )
+
+        est_name = get_sklearn_estimator_name()
+
         # Checking that the inner decision tree does not get the default value for min_samples_leaf, not sure if this will always pass
         self.assertNotEqual(
-            trained.hyperparams()["base_estimator"]
-            .steps()[1]
+            trained.hyperparams()[est_name]
+            .steps_list()[1]
             .hyperparams()["min_samples_leaf"],
             1,
         )
@@ -1002,9 +1000,6 @@ class TestHigherOrderOperators(unittest.TestCase):
 
 class TestSelectKBestTransformer(unittest.TestCase):
     def setUp(self):
-        from sklearn.datasets import load_iris
-        from sklearn.model_selection import train_test_split
-
         data = load_iris()
         X, y = data.data, data.target
         self.X_train, self.X_test, self.y_train, self.y_test = train_test_split(X, y)
@@ -1026,17 +1021,11 @@ class TestSelectKBestTransformer(unittest.TestCase):
 
 class TestTopKVotingClassifier(unittest.TestCase):
     def setUp(self):
-        from sklearn.datasets import load_iris
-        from sklearn.model_selection import train_test_split
-
         data = load_iris()
         X, y = data.data, data.target
         self.X_train, self.X_test, self.y_train, self.y_test = train_test_split(X, y)
 
     def test_fit_predict(self):
-        from lale.lib.lale import TopKVotingClassifier
-        from lale.lib.sklearn import Nystroem
-
         ensemble = TopKVotingClassifier(
             estimator=(PCA() | Nystroem())
             >> (LogisticRegression() | KNeighborsClassifier()),
@@ -1047,9 +1036,6 @@ class TestTopKVotingClassifier(unittest.TestCase):
         trained.predict(self.X_test)
 
     def test_fit_args(self):
-        from lale.lib.lale import TopKVotingClassifier
-        from lale.lib.sklearn import Nystroem
-
         ensemble = TopKVotingClassifier(
             estimator=(PCA() | Nystroem())
             >> (LogisticRegression() | KNeighborsClassifier()),
@@ -1059,9 +1045,6 @@ class TestTopKVotingClassifier(unittest.TestCase):
         trained.predict(self.X_test)
 
     def test_fit_smaller_trials(self):
-        from lale.lib.lale import TopKVotingClassifier
-        from lale.lib.sklearn import Nystroem
-
         ensemble = TopKVotingClassifier(
             estimator=(PCA() | Nystroem())
             >> (LogisticRegression() | KNeighborsClassifier()),
@@ -1073,17 +1056,12 @@ class TestTopKVotingClassifier(unittest.TestCase):
         self.assertLessEqual(len(final_ensemble._impl_instance().estimators), 3)
 
     def test_fit_default_args(self):
-        from lale.lib.lale import TopKVotingClassifier
-
         with self.assertRaises(ValueError):
             _ = TopKVotingClassifier()
 
 
 class TestKNeighborsClassifier(unittest.TestCase):
     def setUp(self):
-        from sklearn.datasets import load_iris
-        from sklearn.model_selection import train_test_split
-
         all_X, all_y = load_iris(return_X_y=True)
         # 15 samples, small enough so folds are likely smaller than n_neighbors
         self.train_X, self.test_X, self.train_y, self.test_y = train_test_split(
@@ -1120,6 +1098,10 @@ class TestKNeighborsClassifier(unittest.TestCase):
             )
         _ = trained.predict(self.test_X)
 
+    @unittest.skipIf(
+        sys.version_info >= (3, 11),
+        "SMAC interface is not currently supported with newer version of Python",
+    )
     def test_smac(self):
         planned = KNeighborsClassifier
         trained = planned.auto_configure(
@@ -1131,7 +1113,6 @@ class TestKNeighborsClassifier(unittest.TestCase):
 class TestKNeighborsRegressor(unittest.TestCase):
     def setUp(self):
         from sklearn.datasets import load_diabetes
-        from sklearn.model_selection import train_test_split
 
         all_X, all_y = load_diabetes(return_X_y=True)
         # 15 samples, small enough so folds are likely smaller than n_neighbors
@@ -1170,6 +1151,10 @@ class TestKNeighborsRegressor(unittest.TestCase):
             )
         _ = trained.predict(self.test_X)
 
+    @unittest.skipIf(
+        sys.version_info >= (3, 11),
+        "SMAC interface is not currently supported with newer version of Python",
+    )
     def test_smac(self):
         planned = KNeighborsRegressor
         trained = planned.auto_configure(
@@ -1181,8 +1166,6 @@ class TestKNeighborsRegressor(unittest.TestCase):
 class TestStandardScaler(unittest.TestCase):
     def setUp(self):
         import scipy.sparse
-        from sklearn.datasets import load_iris
-        from sklearn.model_selection import train_test_split
 
         # from lale.datasets.data_schemas import add_schema
         all_X, all_y = load_iris(return_X_y=True)
@@ -1225,15 +1208,10 @@ class TestStandardScaler(unittest.TestCase):
 
 class TestOptimizeLast(unittest.TestCase):
     def setUp(self):
-        from sklearn.datasets import load_iris
-        from sklearn.model_selection import train_test_split
-
         X, y = load_iris(return_X_y=True)
         self.X_train, self.X_test, self.y_train, self.y_test = train_test_split(X, y)
 
     def test_using_individual_operator(self):
-        from lale.lib.lale import Hyperopt, OptimizeLast
-
         lr = LogisticRegression()  # Individual Operator
         trained_operator = lr.fit(self.X_train, self.y_train)
 
@@ -1254,9 +1232,7 @@ class TestOptimizeLast(unittest.TestCase):
         assert np.array_equal(predictions_1, predictions)
 
     def test_using_pipeline(self):
-        from sklearn.metrics import f1_score, make_scorer
-
-        from lale.lib.lale import Hyperopt, OptimizeLast
+        from sklearn.metrics import f1_score
 
         planned_pipeline = (PCA | NoOp) >> LogisticRegression
 
@@ -1288,8 +1264,6 @@ class TestOptimizeLast(unittest.TestCase):
         assert np.array_equal(predictions_1, predictions)
 
     def test_get_named_pipeline(self):
-        from lale.lib.lale import Hyperopt, OptimizeLast
-
         pipeline = MinMaxScaler() >> KNeighborsClassifier()
         trained_pipeline = pipeline.fit(self.X_train, self.y_train)
 
@@ -1309,9 +1283,6 @@ class TestOptimizeLast(unittest.TestCase):
             self.assertEqual(type(trained_pipeline), type(trained_pipeline2))
 
     def test_unspecified_arguments(self):
-        from lale.lib.lale import OptimizeLast
-        from lale.operators import TrainedIndividualOp
-
         opt = OptimizeLast(optimizer_args={"max_evals": 1})  # No arguments
         res = opt.fit(self.X_train, self.y_train)
         predictions = res.predict(self.X_test)

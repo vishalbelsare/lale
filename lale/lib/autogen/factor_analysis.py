@@ -1,9 +1,10 @@
 import sklearn
 from numpy import inf, nan
+from packaging import version
 from sklearn.decomposition import FactorAnalysis as Op
 
 from lale.docstrings import set_docstrings
-from lale.operators import make_operator
+from lale.operators import make_operator, sklearn_version
 
 
 class _FactorAnalysisImpl:
@@ -65,7 +66,6 @@ _hyperparams_schema = {
                     "type": "number",
                     "minimumForOptimizer": 1e-08,
                     "maximumForOptimizer": 0.01,
-                    "distribution": "loguniform",
                     "default": 0.01,
                     "description": "Stopping tolerance for EM algorithm.",
                 },
@@ -189,12 +189,12 @@ _combined_schemas = {
 }
 FactorAnalysis = make_operator(_FactorAnalysisImpl, _combined_schemas)
 
-if sklearn.__version__ >= "0.24":
+if sklearn_version >= version.Version("0.24"):
     # old: https://scikit-learn.org/0.20/modules/generated/sklearn.decomposition.FactorAnalysis#sklearn-decomposition-factoranalysis
     # new: https://scikit-learn.org/0.24/modules/generated/sklearn.decomposition.FactorAnalysis#sklearn-decomposition-factoranalysis
     FactorAnalysis = FactorAnalysis.customize_schema(
         rotation={
-            "enum": ["varimax", "quartimax"],
+            "enum": ["varimax", "quartimax", None],
             "default": None,
             "description": "if not None, apply the indicated rotation. Currently, varimax and quartimax are implemented.",
         },

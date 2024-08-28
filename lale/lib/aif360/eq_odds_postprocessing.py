@@ -1,4 +1,4 @@
-# Copyright 2019, 2020, 2021 IBM Corporation
+# Copyright 2019-2023 IBM Corporation
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -35,7 +35,7 @@ class _EqOddsPostprocessingImpl(_BasePostEstimatorImpl):
         unfavorable_labels=None,
         estimator,
         redact=True,
-        seed=None,
+        **hyperparams,
     ):
         prot_attr_names = [pa["feature"] for pa in protected_attributes]
         unprivileged_groups = [{name: 0 for name in prot_attr_names}]
@@ -43,9 +43,9 @@ class _EqOddsPostprocessingImpl(_BasePostEstimatorImpl):
         mitigator = aif360.algorithms.postprocessing.EqOddsPostprocessing(
             unprivileged_groups=unprivileged_groups,
             privileged_groups=privileged_groups,
-            seed=seed,
+            **hyperparams,
         )
-        super(_EqOddsPostprocessingImpl, self).__init__(
+        super().__init__(
             favorable_labels=favorable_labels,
             protected_attributes=protected_attributes,
             unfavorable_labels=unfavorable_labels,

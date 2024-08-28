@@ -75,7 +75,10 @@ class set_with_str_for_keys(Generic[VV]):
 
     def __init__(self, elems: Union[Dict[str, VV], Iterable[VV]]):
         if isinstance(elems, dict):
-            self._elems = elems
+            # The type hint is needed since technically a Dict[str, something_else]
+            # is an Iterable[str], which could match the latter type,
+            # but pass this type guard
+            self._elems = elems  # type: ignore
         else:
             self._elems = {str(v): v for v in elems}
 
@@ -88,16 +91,19 @@ class set_with_str_for_keys(Generic[VV]):
     def __str__(self):
         return str(list(self._elems.values()))
 
+    def __contains__(self, key):
+        return key in self._elems
+
     def union(self, *others):
         return set_with_str_for_keys(
             [elem for subl in [self] + list(others) for elem in subl]
         )
 
-    def intersection(self, *others):
+    def intersection(self, *others: "set_with_str_for_keys[VV]"):
         d: Dict[str, VV] = dict(self._elems)
         for ssk in others:
             for k in list(d.keys()):
-                if k not in ssk._elems:
+                if k not in ssk:
                     del d[k]
         return set_with_str_for_keys(d)
 
@@ -105,7 +111,7 @@ class set_with_str_for_keys(Generic[VV]):
         d: Dict[str, VV] = dict(self._elems)
         for ssk in others:
             for k in list(d.keys()):
-                if k in ssk._elems:
+                if k in ssk:
                     del d[k]
         return set_with_str_for_keys(d)
 
@@ -154,7 +160,7 @@ def enumValues(
 ) -> set_with_str_for_keys[Any]:
     """Given an enumeration set and a schema, return all the consistent values of the enumeration."""
     # TODO: actually check.  This should call the json schema validator
-    ret = list()
+    ret = []
     for e in es:
         try:
             always_validate_schema(e, s)
@@ -214,9 +220,7 @@ def simplifyAll(schemas: List[JsonSchema], floatAny: bool) -> JsonSchema:
     s_one: List[JsonSchema] = []
 
     s_not: List[JsonSchema] = []
-    s_not_number_list: List[
-        JsonSchema
-    ] = (
+    s_not_number_list: List[JsonSchema] = (
         []
     )  # a list of schemas that are a top level 'not' with a type='integer' or 'number' under it
 
@@ -262,7 +266,7 @@ def simplifyAll(schemas: List[JsonSchema], floatAny: bool) -> JsonSchema:
                 snot = s["not"]
                 if snot is None:
                     continue
-                elif "enum" in snot:
+                if "enum" in snot:
                     ev = enumValues(
                         set_with_str_for_keys(snot["enum"]),
                         {"not": combined_original_schema},
@@ -369,7 +373,12 @@ def simplifyAll(schemas: List[JsonSchema], floatAny: bool) -> JsonSchema:
 
     if s_enum_list:
         # if there are enumeration constraints, we want their intersection
-        s_enum = set_with_str_for_keys.intersection(*s_enum_list)
+        # pylint note: s_enum_list must be non-empty, and the first element will be used as self
+        s_enum = (
+            set_with_str_for_keys.intersection(  # pylint:disable=no-value-for-parameter
+                *s_enum_list
+            )
+        )
         if not s_enum:
             # This means that enumeration values where specified
             # but none are possible, so this schema is impossible to satisfy
@@ -378,7 +387,12 @@ def simplifyAll(schemas: List[JsonSchema], floatAny: bool) -> JsonSchema:
             )
             return impossible()
     if s_not_enum_list:
-        s_not_enum = set_with_str_for_keys.union(*s_not_enum_list)
+        # pylint note: s_enum_list must be non-empty, and the first element will be used as self
+        s_not_enum = (
+            set_with_str_for_keys.union(  # pylint:disable=no-value-for-parameter
+                *s_not_enum_list
+            )
+        )
 
     if s_enum and s_not_enum:
         s_enum_diff = set_with_str_for_keys.difference(s_enum, s_not_enum)
@@ -408,7 +422,7 @@ def simplifyAll(schemas: List[JsonSchema], floatAny: bool) -> JsonSchema:
                     del o[k]
         s_typed = [s for s in s_typed if s]
 
-    if s_type == "number" or s_type == "integer":
+    if s_type in ["number", "integer"]:
         # First we combine all the positive number range schemas
         s_range = SchemaRange()
         s_range_for_optimizer = SchemaRange()
@@ -537,7 +551,7 @@ def simplifyAll(schemas: List[JsonSchema], floatAny: bool) -> JsonSchema:
             # Remove all existing properties that are
             # not in our schema
             if not o_additionalProperties:
-                for p in s_props:
+                for p in s_props:  # pylint:disable=consider-using-dict-items
                     if p not in o_props:
                         del s_props[p]
             # now go through our properties and add them
@@ -557,7 +571,7 @@ def simplifyAll(schemas: List[JsonSchema], floatAny: bool) -> JsonSchema:
                     )
                     return impossible()
 
-        merged_props = {p: simplifyAll(s_props[p], False) for p in s_props}
+        merged_props = {p: simplifyAll(v, False) for p, v in s_props.items()}
         if s_required:
             for k in s_required:
                 # if the schema is not present, it could be in another branch (such as an anyOf conjunct)
@@ -576,7 +590,7 @@ def simplifyAll(schemas: List[JsonSchema], floatAny: bool) -> JsonSchema:
         if len(s_required) != 0:
             obj["required"] = list(s_required)
         s_typed = [obj]
-    elif s_type == "array" or s_type == "tuple":
+    elif s_type in ["array", "tuple"]:
         is_tuple = s_type == "tuple"
         min_size: int = 0
         max_size: Optional[int] = None
@@ -663,7 +677,7 @@ def simplifyAll(schemas: List[JsonSchema], floatAny: bool) -> JsonSchema:
                 [] for _ in range(longest_item_list)
             ]
             additional_schemas: List[JsonSchema] = []
-            for (arr_item_list, arr_additional_schema) in item_list_entries:
+            for arr_item_list, arr_additional_schema in item_list_entries:
                 for x in range(longest_item_list):
                     ils = ret_item_list_list[x]
                     if x < len(arr_item_list):
@@ -842,10 +856,18 @@ def simplifyAny(schema: List[JsonSchema], floatAny: bool) -> JsonSchema:
 
     if s_enum_list:
         # if there are enumeration constraints, we want their intersection
-        s_enum = set_with_str_for_keys.union(*s_enum_list)
+        # pylint note: s_enum_list must be non-empty, and the first element will be used as self
+        s_enum = set_with_str_for_keys.union(  # pylint:disable=no-value-for-parameter
+            *s_enum_list
+        )
 
     if s_not_enum_list:
-        s_not_enum = set_with_str_for_keys.intersection(*s_not_enum_list)
+        # pylint note: s_enum_list must be non-empty, and the first element will be used as self
+        s_not_enum = (
+            set_with_str_for_keys.intersection(  # pylint:disable=no-value-for-parameter
+                *s_not_enum_list
+            )
+        )
 
     if s_enum and s_not_enum:
         s_not_enum = set_with_str_for_keys.difference(s_not_enum, s_enum)

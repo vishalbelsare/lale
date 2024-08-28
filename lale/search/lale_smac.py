@@ -72,7 +72,7 @@ def get_smac_space(
     op: "Ops.PlannedOperator",
     lale_num_grids: Optional[float] = None,
     lale_pgo: Optional[PGO] = None,
-    data_schema: Dict[str, Any] = {},
+    data_schema: Optional[Dict[str, Any]] = None,
 ) -> ConfigurationSpace:
     """Top level function: given a lale operator, returns a ConfigurationSpace for use with SMAC.
 
@@ -83,6 +83,8 @@ def get_smac_space(
         if set to an integer => 1, it will determine how many parameter grids will be returned (at most)
         if set to an float between 0 and 1, it will determine what fraction should be returned
         note that setting it to 1 is treated as in integer.  To return all results, use None
+    lale_pgo: Optional profile guided optimization data that guides discretization
+    data_schema: Optional schema for the input data. which is used for hyperparameter schema data constraints
     """
 
     hp_grids = get_search_space_grids(
@@ -134,15 +136,15 @@ def SearchSpaceNumberToSMAC(key: str, hp: SearchSpaceNumber) -> Hyperparameter:
         raise ValueError(
             f"maximum not specified for a number with distribution {dist} for {key}"
         )
-    max = hp.getInclusiveMax()
+    space_max = hp.getInclusiveMax()
     if hp.minimum is None:
         raise ValueError(
             f"minimum not specified for a number with distribution {dist} for {key}"
         )
-    min = hp.getInclusiveMin()
+    space_min = hp.getInclusiveMin()
 
     log: bool
-    if dist == "uniform" or dist == "integer":
+    if dist in ["uniform", "integer"]:
         log = False
     elif dist == "loguniform":
         log = True
@@ -150,12 +152,12 @@ def SearchSpaceNumberToSMAC(key: str, hp: SearchSpaceNumber) -> Hyperparameter:
         raise ValueError(f"unknown/unsupported distribution {dist} for {key}")
 
     if hp.discrete:
-        return UniformIntegerHyperparameter(key, min, max, log=log)
+        return UniformIntegerHyperparameter(key, space_min, space_max, log=log)
     else:
-        return UniformFloatHyperparameter(key, min, max, log=log)
+        return UniformFloatHyperparameter(key, space_min, space_max, log=log)
 
 
-class FakeNone(object):
+class FakeNone:
     pass
 
 
@@ -170,7 +172,7 @@ def HPValuetoSMAC(key: str, hp: SearchSpace) -> Hyperparameter:
             return v
 
     if isinstance(hp, SearchSpaceEnum):
-        return CategoricalHyperparameter(key, list(map(val_to_str, hp.vals)))
+        return CategoricalHyperparameter(key, [val_to_str(x) for x in hp.vals])
     elif isinstance(hp, SearchSpaceNumber):
         return SearchSpaceNumberToSMAC(key, hp)
     elif isinstance(hp, SearchSpaceArray):
@@ -202,7 +204,7 @@ def addSearchSpaceGrid(
 def addSearchSpaceGrids(grids: List[SearchSpaceGrid], cs: ConfigurationSpace) -> None:
     parent_disc = CategoricalHyperparameter(disc_str, range(len(grids)))
     cs.add_hyperparameter(parent_disc)
-    for (i, g) in enumerate(grids):
+    for i, g in enumerate(grids):
         addSearchSpaceGrid(g, i, parent_disc, cs)
 
 

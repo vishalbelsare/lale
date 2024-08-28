@@ -1,4 +1,4 @@
-# Copyright 2019, 2020, 2021 IBM Corporation
+# Copyright 2019-2023 IBM Corporation
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -35,29 +35,21 @@ class _RejectOptionClassificationImpl(_BasePostEstimatorImpl):
         unfavorable_labels=None,
         estimator,
         redact=True,
-        low_class_thresh=0.01,
-        high_class_thresh=0.99,
-        num_class_thresh=100,
-        num_ROC_margin=50,
-        metric_name="Statistical parity difference",
-        metric_ub=0.05,
-        metric_lb=-0.05,
+        repair_level=None,
+        **hyperparams,
     ):
         prot_attr_names = [pa["feature"] for pa in protected_attributes]
         unprivileged_groups = [{name: 0 for name in prot_attr_names}]
         privileged_groups = [{name: 1 for name in prot_attr_names}]
+        if repair_level is not None:
+            hyperparams["metric_lb"] = -(1 - repair_level)
+            hyperparams["metric_ub"] = 1 - repair_level
         mitigator = aif360.algorithms.postprocessing.RejectOptionClassification(
             unprivileged_groups=unprivileged_groups,
             privileged_groups=privileged_groups,
-            low_class_thresh=low_class_thresh,
-            high_class_thresh=high_class_thresh,
-            num_class_thresh=num_class_thresh,
-            num_ROC_margin=num_ROC_margin,
-            metric_name=metric_name,
-            metric_ub=metric_ub,
-            metric_lb=metric_lb,
+            **hyperparams,
         )
-        super(_RejectOptionClassificationImpl, self).__init__(
+        super().__init__(
             favorable_labels=favorable_labels,
             protected_attributes=protected_attributes,
             unfavorable_labels=unfavorable_labels,
@@ -144,12 +136,32 @@ _hyperparams_schema = {
                 "metric_ub": {
                     "description": "Upper bound of constraint on the metric value.",
                     "type": "number",
+                    "minimum": 0,
                     "default": 0.05,
+                    "maximum": 1,
                 },
                 "metric_lb": {
                     "description": "Lower bound of constraint on the metric value.",
                     "type": "number",
+                    "minimum": -1,
                     "default": -0.05,
+                    "maximum": 0,
+                },
+                "repair_level": {
+                    "description": "Repair amount from 0 = none to 1 = full.",
+                    "anyOf": [
+                        {
+                            "description": "Keep metric_lb and metric_ub unchanged.",
+                            "enum": [None],
+                        },
+                        {
+                            "description": "Set metric_ub = 1 - repair_level and metric_lb = - metric_ub.",
+                            "type": "number",
+                            "minimum": 0,
+                            "maximum": 1,
+                        },
+                    ],
+                    "default": None,
                 },
             },
         }

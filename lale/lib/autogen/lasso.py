@@ -1,8 +1,10 @@
 from numpy import inf, nan
+from packaging import version
 from sklearn.linear_model import Lasso as Op
 
+import lale
 from lale.docstrings import set_docstrings
-from lale.operators import make_operator
+from lale.operators import make_operator, sklearn_version
 
 
 class _LassoImpl:
@@ -99,7 +101,6 @@ _hyperparams_schema = {
                     "type": "number",
                     "minimumForOptimizer": 1e-08,
                     "maximumForOptimizer": 0.01,
-                    "distribution": "loguniform",
                     "default": 0.0001,
                     "description": "The tolerance for the optimization: if the updates are smaller than ``tol``, the optimization code checks the dual gap for optimality and continues until it is smaller than ``tol``.",
                 },
@@ -197,5 +198,13 @@ _combined_schemas = {
     },
 }
 Lasso = make_operator(_LassoImpl, _combined_schemas)
+
+if sklearn_version >= version.Version("1.2"):
+    # new: "https://scikit-learn.org/1.2/modules/generated/sklearn.linear_model.Lasso#sklearn-linear_model-lasso"
+
+    Lasso = Lasso.customize_schema(
+        normalize=None,
+        set_as_available=True,
+    )
 
 set_docstrings(Lasso)

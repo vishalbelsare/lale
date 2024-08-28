@@ -13,6 +13,7 @@
 # limitations under the License.
 
 import sklearn.svm
+from packaging import version
 
 import lale.docstrings
 import lale.operators
@@ -58,7 +59,6 @@ Note that the value of this parameter depends on the scale of the target variabl
                     "type": "number",
                     "minimumForOptimizer": 1e-08,
                     "maximumForOptimizer": 0.01,
-                    "distribution": "loguniform",
                     "default": 0.0001,
                     "description": "Tolerance for stopping criteria.",
                 },
@@ -201,5 +201,43 @@ _combined_schemas = {
 }
 
 LinearSVR = lale.operators.make_operator(sklearn.svm.LinearSVR, _combined_schemas)
+
+if lale.operators.sklearn_version >= version.Version("1.3"):
+    LinearSVR = LinearSVR.customize_schema(
+        dual={
+            "anyOf": [
+                {
+                    "type": "boolean",
+                    "description": "Prefer dual=False when n_samples > n_features. ",
+                },
+                {
+                    "enum": ["auto"],
+                    "description": "Choose the value of the parameter automatically, based on the values of n_samples, n_features, loss, multi_class and penalty. If n_samples < n_features and optimizer supports chosen loss, multi_class and penalty, then dual will be set to True, otherwise it will be set to False.",
+                },
+            ],
+            "description": "Select the algorithm to either solve the dual or primal optimization problem.",
+            "default": True,
+        },
+        set_as_available=True,
+    )
+
+if lale.operators.sklearn_version >= version.Version("1.5"):
+    LinearSVR = LinearSVR.customize_schema(
+        dual={
+            "anyOf": [
+                {
+                    "type": "boolean",
+                    "description": "Prefer dual=False when n_samples > n_features. ",
+                },
+                {
+                    "enum": ["auto"],
+                    "description": "Choose the value of the parameter automatically, based on the values of n_samples, n_features, loss, multi_class and penalty. If n_samples < n_features and optimizer supports chosen loss, multi_class and penalty, then dual will be set to True, otherwise it will be set to False.",
+                },
+            ],
+            "description": "Select the algorithm to either solve the dual or primal optimization problem.",
+            "default": "auto",
+        },
+        set_as_available=True,
+    )
 
 lale.docstrings.set_docstrings(LinearSVR)

@@ -1,9 +1,10 @@
 import sklearn
 from numpy import inf, nan
+from packaging import version
 from sklearn.calibration import CalibratedClassifierCV as Op
 
 from lale.docstrings import set_docstrings
-from lale.operators import make_operator
+from lale.operators import make_operator, sklearn_version
 
 
 class _CalibratedClassifierCVImpl:
@@ -153,7 +154,7 @@ _combined_schemas = {
 }
 CalibratedClassifierCV = make_operator(_CalibratedClassifierCVImpl, _combined_schemas)
 
-if sklearn.__version__ >= "0.24":
+if sklearn_version >= version.Version("0.24"):
     # old: https://scikit-learn.org/0.20/modules/generated/sklearn.calibration.CalibratedClassifierCV#sklearn-calibration-calibratedclassifiercv
     # new: https://scikit-learn.org/0.24/modules/generated/sklearn.calibration.CalibratedClassifierCV#sklearn-calibration-calibratedclassifiercv
     CalibratedClassifierCV = CalibratedClassifierCV.customize_schema(
@@ -182,6 +183,32 @@ if sklearn.__version__ >= "0.24":
             "description": "Determines how the calibrator is fitted when cv is not 'prefit'. Ignored if cv='prefit",
         },
         set_as_available=True,
+    )
+
+if sklearn_version >= version.Version("1.2"):
+    CalibratedClassifierCV = CalibratedClassifierCV.customize_schema(
+        base_estimator={
+            "anyOf": [
+                {"laleType": "operator"},
+                {"enum": ["deprecated"]},
+            ],
+            "default": "deprecated",
+            "description": "Deprecated. Use `estimator` instead.",
+        },
+        estimator={
+            "anyOf": [
+                {"laleType": "operator"},
+                {"enum": [None], "description": "LinearSVC"},
+            ],
+            "default": None,
+            "description": "The base estimator to fit on random subsets of the dataset.",
+        },
+        set_as_available=True,
+    )
+
+if sklearn_version >= version.Version("1.4"):
+    CalibratedClassifierCV = CalibratedClassifierCV.customize_schema(
+        base_estimator=None, set_as_available=True
     )
 
 

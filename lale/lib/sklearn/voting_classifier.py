@@ -14,9 +14,11 @@
 
 import sklearn
 import sklearn.ensemble
+from packaging import version
 
 import lale.docstrings
 import lale.operators
+from lale.schemas import Bool
 
 _hyperparams_schema = {
     "description": "Soft Voting/Majority Rule classifier for unfitted estimators.",
@@ -253,7 +255,7 @@ VotingClassifier = lale.operators.make_operator(
     sklearn.ensemble.VotingClassifier, _combined_schemas
 )
 
-if sklearn.__version__ >= "0.21":
+if lale.operators.sklearn_version >= version.Version("0.21"):
     # old: N/A (new in this version)
     # new: https://scikit-learn.org/0.21/modules/generated/sklearn.ensemble.VotingClassifier.html
     VotingClassifier = VotingClassifier.customize_schema(
@@ -272,7 +274,17 @@ if sklearn.__version__ >= "0.21":
         set_as_available=True,
     )
 
-if sklearn.__version__ >= "0.24":
+if lale.operators.sklearn_version >= version.Version("0.23"):
+    # new: https://scikit-learn.org/0.23/modules/generated/sklearn.ensemble.VotingClassifier.html
+    VotingClassifier = VotingClassifier.customize_schema(
+        verbose=Bool(
+            default=False,
+            desc="If True, the time elapsed while fitting will be printed as it is completed.",
+        ),
+        set_as_available=True,
+    )
+
+if lale.operators.sklearn_version >= version.Version("0.24"):
     # old: https://scikit-learn.org/0.21/modules/generated/sklearn.ensemble.VotingClassifier.html
     # new: https://scikit-learn.org/0.24/modules/generated/sklearn.ensemble.VotingClassifier.html
     VotingClassifier = VotingClassifier.customize_schema(

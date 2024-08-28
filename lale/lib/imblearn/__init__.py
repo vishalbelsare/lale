@@ -1,4 +1,4 @@
-# Copyright 2019 IBM Corporation
+# Copyright 2019-2023 IBM Corporation
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -27,7 +27,10 @@ Operators:
 * `ADASYN`_
 * `BorderlineSMOTE`_
 * `RandomOverSampler`_
+* `RandomUnderSampler`_
 * `SMOTE`_
+* `SMOTEN`_
+* `SMOTENC`_
 * `SVMSMOTE`_
 * `SMOTEENN`_
 
@@ -39,20 +42,39 @@ Operators:
 .. _`ADASYN`: lale.lib.imblearn.adasyn.html
 .. _`BorderlineSMOTE`: lale.lib.imblearn.borderline_smote.html
 .. _`RandomOverSampler`: lale.lib.imblearn.random_over_sampler.html
+.. _`RandomUnderSampler`: lale.lib.imblearn.random_under_sampler.html
 .. _`SMOTE`: lale.lib.imblearn.smote.html
+.. _`SMOTEN`: lale.lib.imblearn.smoten.html
+.. _`SMOTENC`: lale.lib.imblearn.smotenc.html
 .. _`SVMSMOTE`: lale.lib.imblearn.svm_smote.html
 .. _`SMOTEENN`: lale.lib.imblearn.smoteenn.html
 
 """
 
-from .adasyn import ADASYN
-from .all_knn import AllKNN
-from .borderline_smote import BorderlineSMOTE
-from .condensed_nearest_neighbour import CondensedNearestNeighbour
-from .edited_nearest_neighbours import EditedNearestNeighbours
-from .instance_hardness_threshold import InstanceHardnessThreshold
-from .random_over_sampler import RandomOverSampler
-from .repeated_edited_nearest_neighbours import RepeatedEditedNearestNeighbours
-from .smote import SMOTE
-from .smoteenn import SMOTEENN
-from .svm_smote import SVMSMOTE
+# Note: all imports should be done as
+# from .xxx import XXX as XXX
+# this ensures that pyright considers them to be publicly available
+# and not private imports (this affects lale users that use pyright)
+
+from .adasyn import ADASYN as ADASYN
+from .all_knn import AllKNN as AllKNN
+from .borderline_smote import BorderlineSMOTE as BorderlineSMOTE
+from .condensed_nearest_neighbour import (
+    CondensedNearestNeighbour as CondensedNearestNeighbour,
+)
+from .edited_nearest_neighbours import (
+    EditedNearestNeighbours as EditedNearestNeighbours,
+)
+from .instance_hardness_threshold import (
+    InstanceHardnessThreshold as InstanceHardnessThreshold,
+)
+from .random_over_sampler import RandomOverSampler as RandomOverSampler
+from .random_under_sampler import RandomUnderSampler as RandomUnderSampler
+from .repeated_edited_nearest_neighbours import (
+    RepeatedEditedNearestNeighbours as RepeatedEditedNearestNeighbours,
+)
+from .smote import SMOTE as SMOTE
+from .smoteenn import SMOTEENN as SMOTEENN
+from .smoten import SMOTEN as SMOTEN
+from .smotenc import SMOTENC as SMOTENC
+from .svm_smote import SVMSMOTE as SVMSMOTE

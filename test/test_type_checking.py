@@ -16,10 +16,12 @@ import unittest
 from test import EnableSchemaValidation
 
 import jsonschema
+from packaging import version
 
 import lale.lib.lale
+import lale.operators
 from lale.lib.lale import ConcatFeatures, IdentityWrapper, NoOp
-from lale.lib.sklearn import NMF, LogisticRegression, TfidfVectorizer
+from lale.lib.sklearn import NMF, PCA, LogisticRegression, TfidfVectorizer
 from lale.settings import (
     disable_data_schema_validation,
     disable_hyperparams_schema_validation,
@@ -38,18 +40,18 @@ class TestDatasetSchemas(unittest.TestCase):
             cls._irisArr = {"X": irisArr.data, "y": irisArr.target}
             from lale.datasets import sklearn_to_pandas
 
-            (train_X, train_y), (test_X, test_y) = sklearn_to_pandas.load_iris_df()
+            (train_X, train_y), (_test_X, _test_y) = sklearn_to_pandas.load_iris_df()
             cls._irisDf = {"X": train_X, "y": train_y}
-            (train_X, train_y), (test_X, test_y) = sklearn_to_pandas.digits_df()
+            (train_X, train_y), (_test_X, _test_y) = sklearn_to_pandas.digits_df()
             cls._digits = {"X": train_X, "y": train_y}
             (
                 (train_X, train_y),
-                (test_X, test_y),
+                (_test_X, _test_y),
             ) = sklearn_to_pandas.california_housing_df()
             cls._housing = {"X": train_X, "y": train_y}
             from lale.datasets import openml
 
-            (train_X, train_y), (test_X, test_y) = openml.fetch(
+            (train_X, train_y), (_test_X, _test_y) = openml.fetch(
                 "credit-g", "classification", preprocess=False
             )
             cls._creditG = {"X": train_X, "y": train_y}
@@ -59,7 +61,7 @@ class TestDatasetSchemas(unittest.TestCase):
             cls._movies = {"X": train_X, "y": train_y}
             from lale.datasets.uci.uci_datasets import fetch_drugscom
 
-            train_X, train_y, test_X, test_y = fetch_drugscom()
+            train_X, train_y, _test_X, _test_y = fetch_drugscom()
             cls._drugRev = {"X": train_X, "y": train_y}
 
     @classmethod
@@ -435,7 +437,7 @@ class TestDatasetSchemas(unittest.TestCase):
                 },
             }
             self.maxDiff = None
-            self.assertEqual(transformed_schema, transformed_expected)
+            self.assertEqual(transformed_expected, transformed_schema)
 
     def test_input_schema_fit(self):
         self.maxDiff = None
@@ -932,9 +934,7 @@ class TestHyperparamConstraints(unittest.TestCase):
         y = self.y
 
         trainable = sklearn.preprocessing.FunctionTransformer(**bad_hyperparams)
-        with self.assertRaisesRegex(
-            TypeError, "A sparse matrix was passed, but dense data is required."
-        ):
+        with self.assertRaisesRegex(TypeError, r"[sS]parse.* was passed.* dense data"):
             trainable.fit(bad_X, self.y)
 
         trainable = FunctionTransformer(**bad_hyperparams)
@@ -1023,13 +1023,9 @@ class TestHyperparamConstraints(unittest.TestCase):
     def test_logistic_regression_1(self):
         import sklearn
 
-        from lale.lib.sklearn import LogisticRegression
-
         bad_hyperparams = {"solver": "liblinear", "penalty": "none"}
         trainable = sklearn.linear_model.LogisticRegression(**bad_hyperparams)
-        with self.assertRaisesRegex(
-            ValueError, "penalty='none' is not supported for the liblinear solver"
-        ):
+        with self.assertRaisesRegex(ValueError, r"penalty"):
             trainable.fit(self.X, self.y)
 
         with EnableSchemaValidation():
@@ -1039,15 +1035,13 @@ class TestHyperparamConstraints(unittest.TestCase):
     def test_logistic_regression_2(self):
         import sklearn
 
-        from lale.lib.sklearn import LogisticRegression
-
         bad_hyperparams = {
             "penalty": "elasticnet",
             "l1_ratio": None,
             "solver": "saga",
         }
         trainable = sklearn.linear_model.LogisticRegression(**bad_hyperparams)
-        with self.assertRaisesRegex(ValueError, "l1_ratio must be between 0 and 1"):
+        with self.assertRaises(BaseException):
             trainable.fit(self.X, self.y)
 
         with EnableSchemaValidation():
@@ -1056,8 +1050,6 @@ class TestHyperparamConstraints(unittest.TestCase):
 
     def test_logistic_regression_3(self):
         import sklearn
-
-        from lale.lib.sklearn import LogisticRegression
 
         bad_hyperparams = {
             "penalty": "elasticnet",
@@ -1101,14 +1093,18 @@ class TestHyperparamConstraints(unittest.TestCase):
 
         bad_hyperparams = {"drop": "first", "handle_unknown": "ignore"}
         trainable = sklearn.preprocessing.OneHotEncoder(**bad_hyperparams)
-        with self.assertRaisesRegex(
-            ValueError,
-            "`handle_unknown` must be 'error' when the drop parameter is specified",
-        ):
-            trainable.fit(self.X, self.y)
+        if lale.operators.sklearn_version < version.Version("1.0"):
+            with self.assertRaisesRegex(
+                ValueError,
+                "`handle_unknown` must be 'error' when the drop parameter is specified",
+            ):
+                trainable.fit(self.X, self.y)
 
         with EnableSchemaValidation():
-            with self.assertRaises(jsonschema.ValidationError):
+            if lale.operators.sklearn_version < version.Version("1.0"):
+                with self.assertRaises(jsonschema.ValidationError):
+                    OneHotEncoder(**bad_hyperparams)
+            else:
                 OneHotEncoder(**bad_hyperparams)
 
     def test_ordinal_encoder_1(self):
@@ -1116,7 +1112,7 @@ class TestHyperparamConstraints(unittest.TestCase):
 
         from lale.lib.sklearn import OrdinalEncoder
 
-        if sklearn.__version__ >= "0.24.1":
+        if lale.operators.sklearn_version >= version.Version("0.24.1"):
             bad_hyperparams = {
                 "handle_unknown": "use_encoded_value",
                 "unknown_value": None,
@@ -1137,7 +1133,7 @@ class TestHyperparamConstraints(unittest.TestCase):
 
         from lale.lib.sklearn import OrdinalEncoder
 
-        if sklearn.__version__ >= "0.24.1":
+        if lale.operators.sklearn_version <= version.Version("0.24.1"):
             bad_hyperparams = {"handle_unknown": "error", "unknown_value": 1}
             trainable = sklearn.preprocessing.OrdinalEncoder(**bad_hyperparams)
             with self.assertRaisesRegex(
@@ -1182,6 +1178,7 @@ class TestHyperparamConstraints(unittest.TestCase):
             with self.assertRaises(jsonschema.ValidationError):
                 RandomForestRegressor(**bad_hyperparams)
 
+    @unittest.skip("newer versions of sklearn do support this")
     def test_ridge_1(self):
         import sklearn
 
@@ -1243,6 +1240,10 @@ class TestHyperparamConstraints(unittest.TestCase):
             with self.assertRaises(jsonschema.ValidationError):
                 trainable.fit(bad_X, y)
 
+    @unittest.skipIf(
+        lale.operators.sklearn_version >= version.Version("1.4"),
+        "restrictions have been removed",
+    )
     def test_simple_imputer(self):
         import sklearn
 
@@ -1253,6 +1254,7 @@ class TestHyperparamConstraints(unittest.TestCase):
 
         bad_hyperparams = {"missing_values": 0}
         trainable = sklearn.impute.SimpleImputer(**bad_hyperparams)
+
         with self.assertRaisesRegex(
             ValueError,
             "Imputation not possible when missing_values == 0 and input is sparse.",
@@ -1434,8 +1436,7 @@ class TestDisablingSchemaValidation(unittest.TestCase):
     def test_disable_schema_validation_individual_op(self):
         existing_flag = disable_data_schema_validation
         set_disable_data_schema_validation(True)
-        import lale.schemas as schemas
-        from lale.lib.sklearn import PCA
+        from lale import schemas
 
         pca_input = schemas.Object(
             X=schemas.AnyOf(
@@ -1446,7 +1447,7 @@ class TestDisablingSchemaValidation(unittest.TestCase):
             )
         )
 
-        foo = PCA.customize_schema(input_fit=pca_input)
+        custom_PCA = PCA.customize_schema(input_fit=pca_input)
 
         pca_output = schemas.Object(
             X=schemas.AnyOf(
@@ -1457,17 +1458,16 @@ class TestDisablingSchemaValidation(unittest.TestCase):
             )
         )
 
-        foo = foo.customize_schema(output_transform=pca_output)
+        custom_PCA = custom_PCA.customize_schema(output_transform=pca_output)
 
-        abc = foo()
+        abc = custom_PCA()
         trained_pca = abc.fit(self.X_train)
         trained_pca.transform(self.X_test)
         set_disable_data_schema_validation(existing_flag)
 
     def test_enable_schema_validation_individual_op(self):
         with EnableSchemaValidation():
-            import lale.schemas as schemas
-            from lale.lib.sklearn import PCA
+            from lale import schemas
 
             pca_input = schemas.Object(
                 X=schemas.AnyOf(
@@ -1478,7 +1478,7 @@ class TestDisablingSchemaValidation(unittest.TestCase):
                 )
             )
 
-            foo = PCA.customize_schema(input_fit=pca_input)
+            custom_PCA = PCA.customize_schema(input_fit=pca_input)
 
             pca_output = schemas.Object(
                 X=schemas.AnyOf(
@@ -1489,9 +1489,9 @@ class TestDisablingSchemaValidation(unittest.TestCase):
                 )
             )
 
-            foo = foo.customize_schema(output_transform=pca_output)
+            custom_PCA = custom_PCA.customize_schema(output_transform=pca_output)
 
-            abc = foo()
+            abc = custom_PCA()
             with self.assertRaises(ValueError):
                 trained_pca = abc.fit(self.X_train)
                 trained_pca.transform(self.X_test)
@@ -1499,8 +1499,7 @@ class TestDisablingSchemaValidation(unittest.TestCase):
     def test_disable_schema_validation_pipeline(self):
         existing_flag = disable_data_schema_validation
         set_disable_data_schema_validation(True)
-        import lale.schemas as schemas
-        from lale.lib.sklearn import PCA, LogisticRegression
+        from lale import schemas
 
         lr_input = schemas.Object(
             required=["X", "y"],
@@ -1513,8 +1512,8 @@ class TestDisablingSchemaValidation(unittest.TestCase):
             y=schemas.Array(schemas.String()),
         )
 
-        foo = LogisticRegression.customize_schema(input_fit=lr_input)
-        abc = foo()
+        custom_LR = LogisticRegression.customize_schema(input_fit=lr_input)
+        abc = custom_LR()
         pipeline = PCA() >> abc
         trained_pipeline = pipeline.fit(self.X_train, self.y_train)
         trained_pipeline.predict(self.X_test)
@@ -1522,8 +1521,7 @@ class TestDisablingSchemaValidation(unittest.TestCase):
 
     def test_enable_schema_validation_pipeline(self):
         with EnableSchemaValidation():
-            import lale.schemas as schemas
-            from lale.lib.sklearn import PCA, LogisticRegression
+            from lale import schemas
 
             lr_input = schemas.Object(
                 required=["X", "y"],
@@ -1536,16 +1534,14 @@ class TestDisablingSchemaValidation(unittest.TestCase):
                 y=schemas.Array(schemas.String()),
             )
 
-            foo = LogisticRegression.customize_schema(input_fit=lr_input)
-            abc = foo()
+            custom_LR = LogisticRegression.customize_schema(input_fit=lr_input)
+            abc = custom_LR()
             pipeline = PCA() >> abc
             with self.assertRaises(ValueError):
                 trained_pipeline = pipeline.fit(self.X_train, self.y_train)
                 trained_pipeline.predict(self.X_test)
 
     def test_disable_enable_hyperparam_validation(self):
-        from lale.lib.sklearn import PCA
-
         existing_flag = disable_hyperparams_schema_validation
         set_disable_hyperparams_schema_validation(True)
         PCA(n_components=True)

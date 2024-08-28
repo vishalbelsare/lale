@@ -15,37 +15,38 @@
 import logging
 import time
 import traceback
+import warnings
 
 import numpy as np
 from sklearn.metrics import check_scoring, log_loss
-from sklearn.model_selection import train_test_split
-from sklearn.model_selection._split import check_cv
+from sklearn.model_selection import check_cv, train_test_split
 
 import lale.docstrings
 import lale.helpers
 import lale.operators
 import lale.sklearn_compat
 from lale.helpers import cross_val_score_track_trials
-from lale.lib.sklearn import LogisticRegression
-
-from ._common_schemas import (
+from lale.lib._common_schemas import (
     schema_best_score_single,
     schema_cv,
     schema_estimator,
     schema_max_opt_time,
     schema_scoring_single,
 )
+from lale.lib.sklearn import LogisticRegression
 
 try:
     # Import ConfigSpace and different types of parameters
-    from smac.configspace import ConfigurationSpace
+    with warnings.catch_warnings():
+        warnings.filterwarnings("ignore", category=FutureWarning)
+        from smac.configspace import ConfigurationSpace
 
     # Import SMAC-utilities
     from smac.facade.smac_facade import SMAC as orig_SMAC
     from smac.scenario.scenario import Scenario
     from smac.tae.execute_ta_run import BudgetExhaustedException
 
-    from lale.search.lale_smac import (
+    from lale.search.lale_smac import (  # pylint:disable=wrong-import-position,ungrouped-imports
         get_smac_space,
         lale_op_smac_tae,
         lale_trainable_op_from_config,
@@ -146,9 +147,7 @@ or with
                         logloss = 0
                         logger.debug("Warning, log loss cannot be computed")
                 else:
-                    logger.debug(
-                        "Error {} with pipeline:{}".format(e, trainable.to_json())
-                    )
+                    logger.debug(f"Error {e} with pipeline:{trainable.to_json()}")
                     raise e
             return cv_score, logloss, execution_time
 
@@ -187,14 +186,12 @@ or with
                 "Maximum alloted optimization time exceeded. Optimization exited prematurely"
             )
         except BaseException as e:
-            logger.warning("Error during optimization: {}".format(e))
+            logger.warning(f"Error during optimization: {e}")
             self._best_estimator = None
 
         return self
 
     def predict(self, X_eval, **predict_params):
-        import warnings
-
         warnings.filterwarnings("ignore")
         trained = self._best_estimator
         if trained is None:
@@ -207,9 +204,7 @@ or with
             predictions = trained.predict(X_eval, **predict_params)
         except ValueError as e:
             logger.warning(
-                "ValueError in predicting using SMACCV:{}, the error is:{}".format(
-                    trained, e
-                )
+                f"ValueError in predicting using SMACCV:{trained}, the error is:{e}"
             )
             predictions = None
 
@@ -225,7 +220,9 @@ or with
         """
         return self.trials
 
-    def get_pipeline(self, pipeline_name=None, astype="lale"):
+    def get_pipeline(
+        self, pipeline_name=None, astype: lale.helpers.astype_type = "lale"
+    ):
         if pipeline_name is not None:
             raise NotImplementedError("Cannot get pipeline by name yet.")
         result = getattr(self, "_best_estimator", None)

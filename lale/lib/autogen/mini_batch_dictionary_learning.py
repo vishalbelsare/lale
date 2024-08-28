@@ -1,9 +1,10 @@
 import sklearn
 from numpy import inf, nan
+from packaging import version
 from sklearn.decomposition import MiniBatchDictionaryLearning as Op
 
 from lale.docstrings import set_docstrings
-from lale.operators import make_operator
+from lale.operators import make_operator, sklearn_version
 
 
 class _MiniBatchDictionaryLearningImpl:
@@ -233,7 +234,7 @@ MiniBatchDictionaryLearning = make_operator(
     _MiniBatchDictionaryLearningImpl, _combined_schemas
 )
 
-if sklearn.__version__ >= "0.22":
+if sklearn_version >= version.Version("0.22"):
     # old: https://scikit-learn.org/0.20/modules/generated/sklearn.decomposition.MiniBatchDictionaryLearning#sklearn-decomposition-minibatchdictionarylearning
     # new: https://scikit-learn.org/0.22/modules/generated/sklearn.decomposition.MiniBatchDictionaryLearning#sklearn-decomposition-minibatchdictionarylearning
     MiniBatchDictionaryLearning = MiniBatchDictionaryLearning.customize_schema(
@@ -245,6 +246,39 @@ if sklearn.__version__ >= "0.22":
             "default": 1000,
             "description": "Maximum number of iterations to perform if algorithm='lasso_cd' or 'lasso_lars'",
         },
+        set_as_available=True,
+    )
+
+if sklearn_version >= version.Version("1.1"):
+    MiniBatchDictionaryLearning = MiniBatchDictionaryLearning.customize_schema(
+        max_iter={
+            "type": "integer",
+            "minimumForOptimizer": 5,
+            "maximumForOptimizer": 1000,
+            "distribution": "uniform",
+            "default": 1000,
+            "description": "total number of iterations to perform",
+        },
+        n_iter={
+            "anyOf": [
+                {
+                    "type": "integer",
+                    "minimumForOptimizer": 5,
+                    "maximumForOptimizer": 1000,
+                    "distribution": "uniform",
+                    "default": 1000,
+                },
+                {"enum": ["deprecated"]},
+            ],
+            "description": "total number of iterations to perform",
+            "default": "deprecated",
+        },
+        set_as_available=True,
+    )
+
+if sklearn_version >= version.Version("1.3"):
+    MiniBatchDictionaryLearning = MiniBatchDictionaryLearning.customize_schema(
+        n_iter=None,
         set_as_available=True,
     )
 

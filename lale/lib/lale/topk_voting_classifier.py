@@ -14,11 +14,12 @@
 
 import copy
 import logging
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
 from hyperopt import STATUS_OK
 
 import lale.docstrings
+import lale.helpers
 import lale.operators
 from lale.lib.lale import Hyperopt
 
@@ -32,15 +33,16 @@ class _TopKVotingClassifierImpl:
         self,
         estimator=None,
         optimizer=None,
-        args_to_optimizer: Dict[str, Any] = None,
+        args_to_optimizer: Optional[Dict[str, Any]] = None,
         k=10,
     ):
         self.estimator = estimator
         if self.estimator is None:
             raise ValueError("Estimator is a required argument.")
-        self.optimizer = optimizer
-        if self.optimizer is None:
+        if optimizer is None:
             self.optimizer = Hyperopt
+        else:
+            self.optimizer = optimizer
         if args_to_optimizer is None:
             self.args_to_optimizer = {}
         else:
@@ -72,9 +74,9 @@ class _TopKVotingClassifierImpl:
             del args_to_optimizer["max_evals"]
         except KeyError:
             pass
-        args_to_optimizer[
-            "max_evals"
-        ] = 1  # Currently, voting classifier has no useful hyperparameters to tune.
+        args_to_optimizer["max_evals"] = (
+            1  # Currently, voting classifier has no useful hyperparameters to tune.
+        )
         optimizer_instance2 = self.optimizer(estimator=voting, **args_to_optimizer)
         trained_optimizer2 = optimizer_instance2.fit(X_train, y_train, **fit_params)
         self._best_estimator = trained_optimizer2.get_pipeline()
@@ -94,14 +96,14 @@ class _TopKVotingClassifierImpl:
             predictions = trained.predict(X_eval, **predict_params)
         except ValueError as e:
             logger.warning(
-                "ValueError in predicting using Hyperopt:{}, the error is:{}".format(
-                    trained, e
-                )
+                f"ValueError in predicting using Hyperopt:{trained}, the error is:{e}"
             )
             predictions = None
         return predictions
 
-    def get_pipeline(self, pipeline_name=None, astype="lale"):
+    def get_pipeline(
+        self, pipeline_name=None, astype: lale.helpers.astype_type = "lale"
+    ):
         """Retrieve one of the trials.
 
         Parameters

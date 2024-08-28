@@ -1,5 +1,6 @@
 from numpy import inf, nan
 from sklearn.decomposition import SparsePCA as Op
+from sklearn.utils.metaestimators import available_if
 
 from lale.docstrings import set_docstrings
 from lale.operators import make_operator
@@ -19,6 +20,10 @@ class _SparsePCAImpl:
 
     def transform(self, X):
         return self._wrapped_model.transform(X)
+
+    @available_if(lambda self: (hasattr(self._wrapped_model, "inverse_transform")))
+    def inverse_transform(self, X):
+        return self._wrapped_model.inverse_transform(X)
 
 
 _hyperparams_schema = {
@@ -87,7 +92,6 @@ _hyperparams_schema = {
                     "type": "number",
                     "minimumForOptimizer": 1e-08,
                     "maximumForOptimizer": 0.01,
-                    "distribution": "loguniform",
                     "default": 1e-08,
                     "description": "Tolerance for the stopping condition.",
                 },

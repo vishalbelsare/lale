@@ -1,4 +1,4 @@
-# Copyright 2019 IBM Corporation
+# Copyright 2019-2023 IBM Corporation
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -23,7 +23,7 @@ import pandas as pd
 import lale.datasets.data_schemas
 
 download_data_dir = os.path.join(os.path.dirname(__file__), "download_data")
-download_data_url = "http://archive.ics.uci.edu/ml/machine-learning-databases"
+download_data_url = "http://archive.ics.uci.edu/static/public"
 
 
 def download(dataset_id, zip_name, contents_files):
@@ -41,13 +41,13 @@ def download(dataset_id, zip_name, contents_files):
 
     if not all_downloaded():
         with tempfile.NamedTemporaryFile(suffix=".zip") as tmp_zip_file:
-            urllib.request.urlretrieve(zip_url, tmp_zip_file.name)
+            # this request is to a string that begins with a hardcoded http url, so does not risk leaking local data
+            urllib.request.urlretrieve(zip_url, tmp_zip_file.name)  # nosec
             with zipfile.ZipFile(tmp_zip_file.name) as myzip:
-                for i in range(len(contents_files)):
-                    full, base = full_file_names[i], contents_files[i]
+                for full, base in zip(full_file_names, contents_files):
                     if not os.path.exists(full):
                         myzip.extract(base, data_dir)
-    assert all_downloaded
+    assert all_downloaded()
     return full_file_names
 
 
@@ -91,7 +91,9 @@ def tsv_to_Xy(file_name, target_col, schema_orig):
 
 def fetch_drugscom():
     files = download(
-        "00462", "drugsCom_raw.zip", ["drugsComTest_raw.tsv", "drugsComTrain_raw.tsv"]
+        "462",
+        "drug+review+dataset+drugs+com.zip",
+        ["drugsComTest_raw.tsv", "drugsComTrain_raw.tsv"],
     )
     target_col = "rating"
     json_schema = {
@@ -105,7 +107,7 @@ def fetch_drugscom():
                 {"description": "drugName", "type": "string"},
                 {
                     "description": "condition",
-                    "anyOf": [{"type": "string"}, {"enum": [np.NaN]}],
+                    "anyOf": [{"type": "string"}, {"enum": [np.nan]}],
                 },
                 {"description": "review", "type": "string"},
                 {
@@ -124,7 +126,9 @@ def fetch_drugscom():
 
 def fetch_household_power_consumption():
     file_name = download(
-        "00235", "household_power_consumption.zip", ["household_power_consumption.txt"]
+        "235",
+        "individual+household+electric+power+consumption.zip",
+        ["household_power_consumption.txt"],
     )
     df = pd.read_csv(file_name[0], sep=";")
     return df

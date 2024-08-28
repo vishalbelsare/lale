@@ -1,6 +1,8 @@
 from numpy import inf, nan
+from packaging import version
 from sklearn.linear_model import MultiTaskLassoCV as Op
 
+import lale.operators
 from lale.docstrings import set_docstrings
 from lale.operators import make_operator
 
@@ -104,7 +106,6 @@ _hyperparams_schema = {
                     "type": "number",
                     "minimumForOptimizer": 1e-08,
                     "maximumForOptimizer": 0.01,
-                    "distribution": "loguniform",
                     "default": 0.0001,
                     "description": "The tolerance for the optimization: if the updates are smaller than ``tol``, the optimization code checks the dual gap for optimality and continues until it is smaller than ``tol``.",
                 },
@@ -231,5 +232,10 @@ _combined_schemas = {
     },
 }
 MultiTaskLassoCV = make_operator(_MultiTaskLassoCVImpl, _combined_schemas)
+
+if lale.operators.sklearn_version >= version.Version("1.2"):
+    # old: https://scikit-learn.org/1.1/modules/generated/sklearn.linear_model.MultiTaskLassoCV.html
+    # new: https://scikit-learn.org/1.2/modules/generated/sklearn.linear_model.MultiTaskLassoCV.html
+    MultiTaskLassoCV = MultiTaskLassoCV.customize_schema(normalize=None)
 
 set_docstrings(MultiTaskLassoCV)

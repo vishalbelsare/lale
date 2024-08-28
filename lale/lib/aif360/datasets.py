@@ -1,4 +1,4 @@
-# Copyright 2021 IBM Corporation
+# Copyright 2021-2023 IBM Corporation
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -12,8 +12,30 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+"""Fetcher methods to load fairness datasets and provide fairness_info for them.
+
+See the notebook `demo_fairness_datasets`_ for an example for using
+the functions, along with some tables and figures about them.
+There is also an `arxiv paper`_ about these datasets.
+Some of the fetcher methods have a `preprocess` argument that
+defaults to False.
+The notebook does not use that argument, instead demonstrating how
+to do any required preprocessing in the context of a Lale pipeline.
+Most of the datasets are from `OpenML`_, a few are from `meps.ahrq`_ or
+`ProPublica`_, and most of the datasets have been used in various papers.
+The Lale library does not distribute the datasets themselves, it only
+provides methods for downloading them.
+
+.. _`demo_fairness_datasets`: https://github.com/IBM/lale/blob/master/examples/demo_fairness_datasets.ipynb
+.. _`arXiv paper`: https://arxiv.org/abs/2308.00133
+.. _`OpenML`: https://www.openml.org/
+.. _`meps.ahrq`: https://meps.ahrq.gov/data_stats/data_use.jsp
+.. _`ProPublica`: https://github.com/propublica/compas-analysis
+"""
+
 import logging
 import os
+import typing
 import urllib.request
 from enum import Enum
 
@@ -33,7 +55,7 @@ logger = logging.getLogger(__name__)
 logger.setLevel(logging.ERROR)
 
 
-def fetch_adult_df(preprocess=False):
+def fetch_adult_df(preprocess: bool = False):
     """
     Fetch the `adult`_ dataset from OpenML and add `fairness_info`.
     It contains information about individuals from the 1994 U.S. census.
@@ -116,7 +138,7 @@ def fetch_adult_df(preprocess=False):
         return orig_X, orig_y, fairness_info
 
 
-def fetch_bank_df(preprocess=False):
+def fetch_bank_df(preprocess: bool = False):
     """
     Fetch the `bank-marketing`_ dataset from OpenML and add `fairness_info`.
 
@@ -210,32 +232,15 @@ def fetch_bank_df(preprocess=False):
         return orig_X, orig_y, fairness_info
 
 
-def fetch_tae_df(preprocess=False):
+def fetch_default_credit_df():
     """
-    Fetch the `tae`_ dataset from OpenML and add `fairness_info`.
+    Fetch the `Default of Credit Card Clients Dataset`_ from OpenML and add `fairness_info`.
+    It is a binary classification to predict whether the customer suffers
+    a default in the next month (1) or not (0).
+    The dataset has 30,000 rows and 24 columns, all numeric.
+    The protected attribute is sex and the disparate impact is 0.957.
 
-    It contains information from teaching assistant (TA) evaluations.
-    at the University of Wisconsin--Madison.
-    The prediction task is a classification on the type
-    of rating a TA receives (1=Low, 2=Medium, 3=High). Without preprocessing,
-    the dataset has 151 rows and 5 columns. There is one protected
-    attributes, "whether_of_not_the_ta_is_a_native_english_speaker" [sic],
-    and the disparate impact of 0.45. The data
-    includes both categorical and numeric columns, with no missing
-    values.
-
-    .. _`tae`: https://www.openml.org/d/48
-
-    Parameters
-    ----------
-    preprocess : boolean, optional, default False
-
-      If True,
-      encode protected attributes in X as 0 or 1 to indicate privileged group
-      ("native_english_speaker");
-      encode labels in y as 0 or 1 to indicate favorable outcomes;
-      and apply one-hot encoding to any remaining features in X that
-      are categorical and not protecteded attributes.
+    .. _`Default of Credit Card Clients Dataset`: https://www.openml.org/d/43435
 
     Returns
     -------
@@ -255,12 +260,303 @@ def fetch_tae_df(preprocess=False):
           and mitigation operators in `lale.lib.aif360`.
     """
     (train_X, train_y), (test_X, test_y) = lale.datasets.openml.fetch(
-        "tae", "classification", astype="pandas", preprocess=preprocess
+        "Default-of-Credit-Card-Clients-Dataset",
+        "classification",
+        astype="pandas",
+        preprocess=False,
+    )
+    orig_X = pd.concat([train_X, test_X]).sort_index()
+    orig_y = pd.concat([train_y, test_y]).sort_index()
+    fairness_info = {
+        "favorable_labels": [0],
+        "protected_attributes": [
+            {"feature": "sex", "reference_group": [2]},  # female
+        ],
+    }
+    return orig_X, orig_y, fairness_info
+
+
+def fetch_heart_disease_df():
+    """
+    Fetch the `heart-disease`_ dataset from OpenML and add `fairness_info`.
+    It is a binary classification to predict heart disease from the
+    Cleveland database, with 303 rows and 13 columns, all numeric.
+    The protected attribute is age and the disparate impact is 0.589.
+
+    .. _`heart-disease`: https://www.openml.org/d/43398
+
+    Returns
+    -------
+    result : tuple
+
+      - item 0: pandas Dataframe
+
+          Features X, including both protected and non-protected attributes.
+
+      - item 1: pandas Series
+
+          Labels y.
+
+      - item 3: fairness_info
+
+          JSON meta-data following the format understood by fairness metrics
+          and mitigation operators in `lale.lib.aif360`.
+    """
+    (train_X, train_y), (test_X, test_y) = lale.datasets.openml.fetch(
+        "heart-disease", "classification", astype="pandas", preprocess=False
+    )
+    orig_X = pd.concat([train_X, test_X]).sort_index()
+    orig_y = pd.concat([train_y, test_y]).sort_index()
+    fairness_info = {
+        "favorable_labels": [1],
+        "protected_attributes": [
+            {"feature": "age", "reference_group": [[0, 54]]},
+        ],
+    }
+    return orig_X, orig_y, fairness_info
+
+
+def fetch_law_school_df():
+    """Fetch the `law school`_ dataset from OpenML and add `fairness_info`.
+    This function returns both X and y unchanged, since the dataset
+    was already binarized by the OpenML contributors, with the target
+    of predicting whether the GPA is greater than 3.
+    The protected attributes is race1 and the disparate impact is 0.704.
+    The dataset has 20,800 rows and 11 columns (5 categorical and 6
+    numeric columns).
+
+    .. _`law school`: https://www.openml.org/d/43890
+
+    Returns
+    -------
+    result : tuple
+
+      - item 0: pandas Dataframe
+
+          Features X, including both protected and non-protected attributes.
+
+      - item 1: pandas Series
+
+          Labels y.
+
+      - item 3: fairness_info
+
+          JSON meta-data following the format understood by fairness metrics
+          and mitigation operators in `lale.lib.aif360`.
+
+    """
+    (train_X, train_y), (test_X, test_y) = lale.datasets.openml.fetch(
+        "law-school-admission-bianry",
+        "classification",
+        astype="pandas",
+        preprocess=False,
+    )
+    orig_X = pd.concat([train_X, test_X]).sort_index()
+    orig_y = pd.concat([train_y, test_y]).sort_index()
+    fairness_info = {
+        "favorable_labels": ["TRUE"],
+        "protected_attributes": [
+            {"feature": "race1", "reference_group": ["white"]},
+        ],
+    }
+    return orig_X, orig_y, fairness_info
+
+
+def fetch_nlsy_df():
+    """
+    Fetch the `National Longitudinal Survey for the Youth (NLSY)`_ (also known as "University of Michigan Health and Retirement Study (HRS)") dataset from OpenML and add `fairness_info`.
+
+    It is a binary classification to predict whether the income at a
+    certain time exceeds a threshold, with 4,908 rows and 15 columns
+    (comprising 6 categorical and 9 numerical columns).
+    The protected attributes are age and gender and the disparate
+    impact is 0.668.
+
+    .. _`National Longitudinal Survey for the Youth (NLSY)`: https://www.openml.org/d/43892
+
+    Returns
+    -------
+    result : tuple
+
+      - item 0: pandas Dataframe
+
+          Features X, including both protected and non-protected attributes.
+
+      - item 1: pandas Series
+
+          Labels y.
+
+      - item 3: fairness_info
+
+          JSON meta-data following the format understood by fairness metrics
+          and mitigation operators in `lale.lib.aif360`.
+    """
+    (train_X, train_y), (test_X, test_y) = lale.datasets.openml.fetch(
+        "national-longitudinal-survey-binary",
+        "classification",
+        astype="pandas",
+        preprocess=False,
+    )
+    orig_X = pd.concat([train_X, test_X]).sort_index()
+    orig_y = pd.concat([train_y, test_y]).sort_index()
+    dropped_X = orig_X.drop(labels=["income96"], axis=1)
+    fairness_info = {
+        "favorable_labels": ["1"],
+        "protected_attributes": [
+            {"feature": "age", "reference_group": [[18, 120]]},
+            {"feature": "gender", "reference_group": ["Male"]},
+        ],
+    }
+    return dropped_X, orig_y, fairness_info
+
+
+def fetch_student_math_df():
+    """
+    Fetch the `Student Performance (Math)`_ dataset from OpenML and add `fairness_info`.
+
+    The original prediction target is a integer math grade from 1 to 20.
+    This function returns X unchanged but with a binarized version of
+    the target y, using 1 for values >=10 and 0 otherwise.
+    The two protected attributes are sex and age
+    and the disparate impact is 0.894.
+    The dataset has 395 rows and 32 columns,
+    including both categorical and numeric columns.
+
+    .. _`Student Performance (Math)`: https://www.openml.org/d/42352
+
+    Returns
+    -------
+    result : tuple
+
+      - item 0: pandas Dataframe
+
+          Features X, including both protected and non-protected attributes.
+
+      - item 1: pandas Series
+
+          Labels y.
+
+      - item 3: fairness_info
+
+          JSON meta-data following the format understood by fairness metrics
+          and mitigation operators in `lale.lib.aif360`.
+    """
+    (train_X, train_y), (test_X, test_y) = lale.datasets.openml.fetch(
+        "UCI-student-performance-mat", "regression", astype="pandas", preprocess=False
+    )
+    orig_X = pd.concat([train_X, test_X]).sort_index()
+    orig_y = pd.concat([train_y, test_y]).sort_index()
+    encoded_y = pd.Series(orig_y >= 12, dtype=np.float64, name="g3_ge_10")
+    fairness_info = {
+        "favorable_labels": [1],
+        "protected_attributes": [
+            {"feature": "sex", "reference_group": ["F"]},
+            {"feature": "age", "reference_group": [[0, 17]]},
+        ],
+    }
+    return orig_X, encoded_y, fairness_info
+
+
+def fetch_student_por_df():
+    """
+    Fetch the `Student Performance (Portuguese)`_ dataset from OpenML and add `fairness_info`.
+
+    The original prediction target is a integer Portuguese grade from 1 to 20.
+    This function returns X unchanged but with a binarized version of
+    the target y, using 1 for values >=10 and 0 otherwise.
+    The two protected attributes are sex and age
+    and the disparate impact is 0.858.
+    The dataset has 649 rows and 32 columns,
+    including both categorical and numeric columns.
+
+    .. _`Student Performance (Portuguese)`: https://www.openml.org/d/42351
+
+    Returns
+    -------
+    result : tuple
+
+      - item 0: pandas Dataframe
+
+          Features X, including both protected and non-protected attributes.
+
+      - item 1: pandas Series
+
+          Labels y.
+
+      - item 3: fairness_info
+
+          JSON meta-data following the format understood by fairness metrics
+          and mitigation operators in `lale.lib.aif360`.
+    """
+    (train_X, train_y), (test_X, test_y) = lale.datasets.openml.fetch(
+        "UCI-student-performance-por", "regression", astype="pandas", preprocess=False
+    )
+    orig_X = pd.concat([train_X, test_X]).sort_index()
+    orig_y = pd.concat([train_y, test_y]).sort_index()
+    encoded_y = pd.Series(orig_y >= 10, dtype=np.float64, name="g3_ge_10")
+    fairness_info = {
+        "favorable_labels": [1],
+        "protected_attributes": [
+            {"feature": "sex", "reference_group": ["F"]},
+            {"feature": "age", "reference_group": [[0, 17]]},
+        ],
+    }
+    return orig_X, encoded_y, fairness_info
+
+
+def fetch_tae_df(preprocess: bool = False):
+    """
+    Fetch the `tae`_ dataset from OpenML and add `fairness_info`.
+
+    It contains information from teaching assistant (TA) evaluations.
+    at the University of Wisconsin--Madison.
+    The prediction task is a classification on the type
+    of rating a TA receives (1=Low, 2=Medium, 3=High). Without preprocessing,
+    the dataset has 151 rows and 5 columns. There is one protected
+    attributes, "whether_of_not_the_ta_is_a_native_english_speaker" [sic],
+    and the disparate impact of 0.45. The data
+    includes both categorical and numeric columns, with no missing
+    values.
+
+    .. _`tae`: https://www.openml.org/d/48
+
+    Parameters
+    ----------
+    preprocess : boolean or "y", optional, default False
+
+      If True,
+      encode protected attributes in X as 0 or 1 to indicate privileged group
+      ("native_english_speaker");
+      encode labels in y as 0 or 1 to indicate favorable outcomes;
+      and apply one-hot encoding to any remaining features in X that
+      are categorical and not protecteded attributes.
+      If "y", leave features X unchanged and only encode labels y as 0 or 1.
+      If False, encode neither features X nor labels y.
+
+    Returns
+    -------
+    result : tuple
+
+      - item 0: pandas Dataframe
+
+          Features X, including both protected and non-protected attributes.
+
+      - item 1: pandas Series
+
+          Labels y.
+
+      - item 3: fairness_info
+
+          JSON meta-data following the format understood by fairness metrics
+          and mitigation operators in `lale.lib.aif360`.
+    """
+    (train_X, train_y), (test_X, test_y) = lale.datasets.openml.fetch(
+        "tae", "classification", astype="pandas", preprocess=(preprocess is True)
     )
     orig_X = pd.concat([train_X, test_X]).sort_index().astype(np.float64)
     orig_y = pd.concat([train_y, test_y]).sort_index().astype(np.float64)
 
-    if preprocess:
+    if preprocess is True:
         native_english_speaker = pd.Series(
             orig_X["whether_of_not_the_ta_is_a_native_english_speaker_1"] == 1,
             dtype=np.float64,
@@ -281,6 +577,18 @@ def fetch_tae_df(preprocess=False):
             ],
         }
         return encoded_X, encoded_y, fairness_info
+    elif preprocess == "y":
+        encoded_y = pd.Series(orig_y == 2, dtype=np.float64)
+        fairness_info = {
+            "favorable_labels": [1],
+            "protected_attributes": [
+                {
+                    "feature": "whether_of_not_the_ta_is_a_native_english_speaker",
+                    "reference_group": [1],
+                },
+            ],
+        }
+        return orig_X, encoded_y, fairness_info
     else:
         fairness_info = {
             "favorable_labels": [3],
@@ -292,6 +600,54 @@ def fetch_tae_df(preprocess=False):
             ],
         }
         return orig_X, orig_y, fairness_info
+
+
+def fetch_us_crime_df():
+    """
+    Fetch the `us_crime`_ (also known as "communities and crime") dataset from OpenML and add `fairness_info`.
+    The original dataset has several columns with a large number of
+    missing values, which this function drops.
+    The binary protected attribute is blackgt6pct, which is derived by
+    thresholding racepctblack > 0.06 and dropping the original racepctblack.
+    The binary target is derived by thresholding its original y > 0.70.
+    The disparate impact is 0.888.
+    The resulting dataset has 1,994 rows and 102 columns,
+    all but one of which are numeric.
+
+    .. _`us_crime`: https://www.openml.org/d/315
+
+    Returns
+    -------
+    result : tuple
+
+      - item 0: pandas Dataframe
+
+          Features X, including both protected and non-protected attributes.
+
+      - item 1: pandas Series
+
+          Labels y.
+
+      - item 3: fairness_info
+
+          JSON meta-data following the format understood by fairness metrics
+          and mitigation operators in `lale.lib.aif360`.
+    """
+    (train_X, train_y), (test_X, test_y) = lale.datasets.openml.fetch(
+        "us_crime", "regression", astype="pandas", preprocess=False
+    )
+    orig_X = pd.concat([train_X, test_X]).sort_index()
+    orig_y = pd.concat([train_y, test_y]).sort_index()
+    blackgt6pct = orig_X.racepctblack > 0.06
+    to_drop = ["racepctblack"] + [c for c in orig_X.columns if orig_X[c].hasnans]
+    dropped_X = orig_X.drop(labels=to_drop, axis=1)
+    encoded_X = dropped_X.assign(blackgt6pct=blackgt6pct)
+    encoded_y = pd.Series(orig_y >= 0.7, name="crimegt70pct")
+    fairness_info = {
+        "favorable_labels": [0],
+        "protected_attributes": [{"feature": "blackgt6pct", "reference_group": [0]}],
+    }
+    return encoded_X, encoded_y, fairness_info
 
 
 # COMPAS HELPERS
@@ -318,7 +674,8 @@ def _try_download_compas(violent_recidivism=False):
     filepath = _get_compas_filepath(filename)
     csv_exists = os.path.exists(filepath)
     if not csv_exists:
-        urllib.request.urlretrieve(
+        # this request is to a string that begins with a hardcoded https url, so does not risk leaking local data
+        urllib.request.urlretrieve(  # nosec
             f"https://raw.githubusercontent.com/propublica/compas-analysis/master/{filename}",
             filepath,
         )
@@ -341,27 +698,25 @@ def _get_pandas_and_fairness_info_from_compas_dataset(dataset):
 def _get_dataframe_from_compas_csv(violent_recidivism=False):
     filename = _get_compas_filename(violent_recidivism=violent_recidivism)
     filepath = _get_compas_filepath(filename)
+    df: typing.Any = None
     try:
         df = pd.read_csv(filepath, index_col="id", na_values=[])
     except IOError as err:
         # In practice should not get here because of the _try_download_compas call above, but adding failure logic just in case
-        logger.error("IOError: {}".format(err))
+        logger.error(f"IOError: {err}")
         logger.error("To use this class, please download the following file:")
         logger.error(
             "\n\thttps://raw.githubusercontent.com/propublica/compas-analysis/master/compas-scores-two-years.csv"
         )
         logger.error("\nand place it, as-is, in the folder:")
-        logger.error("\n\t{}\n".format(os.path.abspath(os.path.dirname(filepath))))
+        logger.error(f"\n\t{os.path.abspath(os.path.dirname(filepath))}\n")
         import sys
 
         sys.exit(1)
     if violent_recidivism:
         # violent recidivism dataset includes extra label column for some reason
         df = pd.DataFrame(
-            df,
-            columns=list(
-                filter(lambda x: x != "two_year_recid.1", df.columns.tolist())
-            ),
+            df, columns=[x for x in df.columns.tolist() if x != "two_year_recid.1"]
         ).sort_index()
     return df
 
@@ -468,14 +823,14 @@ def _perform_custom_preprocessing(df):
         else:
             return 0.0
 
-    dfcutQ["priors_count"] = dfcutQ["priors_count"].apply(lambda x: quantizePrior(x))
-    dfcutQ["length_of_stay"] = dfcutQ["length_of_stay"].apply(lambda x: quantizeLOS(x))
-    dfcutQ["score_text"] = dfcutQ["score_text"].apply(lambda x: quantizeScore(x))
-    dfcutQ["age_cat"] = dfcutQ["age_cat"].apply(lambda x: adjustAge(x))
+    dfcutQ["priors_count"] = dfcutQ["priors_count"].apply(quantizePrior)
+    dfcutQ["length_of_stay"] = dfcutQ["length_of_stay"].apply(quantizeLOS)
+    dfcutQ["score_text"] = dfcutQ["score_text"].apply(quantizeScore)
+    dfcutQ["age_cat"] = dfcutQ["age_cat"].apply(adjustAge)
 
     # Recode sex and race
     dfcutQ["sex"] = dfcutQ["sex"].replace({"Female": 1.0, "Male": 0.0})
-    dfcutQ["race"] = dfcutQ["race"].apply(lambda x: group_race(x))
+    dfcutQ["race"] = dfcutQ["race"].apply(group_race)
 
     features = [
         "two_year_recid",
@@ -497,7 +852,7 @@ def _get_pandas_and_fairness_info_from_compas_csv(violent_recidivism=False):
     # preprocessing steps performed by ProPublica team, even in the preprocess=False case
     df = _perform_default_preprocessing(df)
     X = pd.DataFrame(
-        df, columns=list(filter(lambda x: x != "two_year_recid", df.columns.tolist()))
+        df, columns=[x for x in df.columns.tolist() if x != "two_year_recid"]
     ).sort_index()
     y = pd.Series(
         df["two_year_recid"], name="two_year_recid", dtype=np.float64
@@ -512,7 +867,7 @@ def _get_pandas_and_fairness_info_from_compas_csv(violent_recidivism=False):
     return X, y, fairness_info
 
 
-def fetch_compas_df(preprocess=False):
+def fetch_compas_df(preprocess: bool = False):
     """
     Fetch the `compas-two-years`_ dataset, also known as ProPublica recidivism, from GitHub and add `fairness_info`.
 
@@ -573,7 +928,7 @@ def fetch_compas_df(preprocess=False):
         )
 
 
-def fetch_compas_violent_df(preprocess=False):
+def fetch_compas_violent_df(preprocess: bool = False):
     """
     Fetch the `compas-two-years-violent`_ dataset, also known as ProPublica violent recidivism, from GitHub and add `fairness_info`.
 
@@ -666,7 +1021,7 @@ def fetch_compas_violent_df(preprocess=False):
         )
 
 
-def fetch_creditg_df(preprocess=False):
+def fetch_creditg_df(preprocess: bool = False):
     """
     Fetch the `credit-g`_ dataset from OpenML and add `fairness_info`.
 
@@ -755,7 +1110,7 @@ def fetch_creditg_df(preprocess=False):
         return orig_X, orig_y, fairness_info
 
 
-def fetch_ricci_df(preprocess=False):
+def fetch_ricci_df(preprocess: bool = False):
     """
     Fetch the `ricci_vs_destefano`_ dataset from OpenML and add `fairness_info`.
 
@@ -817,7 +1172,7 @@ def fetch_ricci_df(preprocess=False):
         return orig_X, orig_y, fairness_info
 
 
-def fetch_speeddating_df(preprocess=False):
+def fetch_speeddating_df(preprocess: bool = False):
     """
     Fetch the `SpeedDating`_ dataset from OpenML and add `fairness_info`.
 
@@ -876,7 +1231,9 @@ def fetch_speeddating_df(preprocess=False):
         def preprocessed_column_filter(x: str):
             return x.startswith("d_")
 
-        columns_to_drop.extend(list(filter(preprocessed_column_filter, orig_X.columns)))
+        columns_to_drop.extend(
+            [x for x in orig_X.columns if preprocessed_column_filter(x)]
+        )
 
         # drop has-null columns
         columns_to_drop.extend(["has_null_0", "has_null_1"])
@@ -886,14 +1243,14 @@ def fetch_speeddating_df(preprocess=False):
         def decision_column_filter(x: str):
             return x.startswith("decision")
 
-        columns_to_drop.extend(list(filter(decision_column_filter, orig_X.columns)))
+        columns_to_drop.extend([x for x in orig_X.columns if decision_column_filter(x)])
 
         # drop field columns
 
         def field_column_filter(x: str):
             return x.startswith("field")
 
-        columns_to_drop.extend(list(filter(field_column_filter, orig_X.columns)))
+        columns_to_drop.extend([x for x in orig_X.columns if field_column_filter(x)])
 
         # drop wave column
         columns_to_drop.append("wave")
@@ -920,7 +1277,7 @@ def fetch_speeddating_df(preprocess=False):
         return orig_X, orig_y, fairness_info
 
 
-def _fetch_boston_housing_df(preprocess=False):
+def _fetch_boston_housing_df(preprocess: bool = False):
     """
     Fetch the `Boston housing`_ dataset from sklearn and add `fairness info`.
 
@@ -990,7 +1347,7 @@ def _fetch_boston_housing_df(preprocess=False):
         return orig_X, orig_y, fairness_info
 
 
-def fetch_nursery_df(preprocess=False):
+def fetch_nursery_df(preprocess: bool = False):
     """
     Fetch the `nursery`_ dataset from OpenML and add `fairness_info`.
 
@@ -1065,7 +1422,7 @@ def fetch_nursery_df(preprocess=False):
         return orig_X, orig_y, fairness_info
 
 
-def fetch_titanic_df(preprocess=False):
+def fetch_titanic_df(preprocess: bool = False):
     """
     Fetch the `Titanic`_ dataset from OpenML and add `fairness_info`.
 
@@ -1123,7 +1480,7 @@ def fetch_titanic_df(preprocess=False):
             )
 
         columns_to_drop.extend(
-            list(filter(extra_categorical_columns_filter, orig_X.columns))
+            [x for x in orig_X.columns if extra_categorical_columns_filter(x)]
         )
         dropped_X = orig_X.drop(labels=columns_to_drop, axis=1)
         encoded_X = dropped_X.assign(sex=sex)
@@ -1145,12 +1502,12 @@ def fetch_titanic_df(preprocess=False):
 
 
 # MEPS HELPERS
-class FiscalYear(Enum):
+class _MepsYear(Enum):
     FY2015 = 15
     FY2016 = 16
 
 
-class Panel(Enum):
+class _MepsPanel(Enum):
     PANEL19 = 19
     PANEL20 = 20
     PANEL21 = 21
@@ -1176,7 +1533,7 @@ def _get_utilization_columns(fiscal_year):
 
 def _get_total_utilization(row, fiscal_year):
     cols = _get_utilization_columns(fiscal_year)
-    return sum(list(map(lambda x: row[x], cols)))
+    return sum((row[x] for x in cols))
 
 
 def _should_drop_column(x, fiscal_year):
@@ -1186,11 +1543,11 @@ def _should_drop_column(x, fiscal_year):
 
 def _fetch_meps_raw_df(panel, fiscal_year):
     filename = ""
-    if fiscal_year == FiscalYear.FY2015:
-        assert panel == Panel.PANEL19 or panel == Panel.PANEL20
+    if fiscal_year == _MepsYear.FY2015:
+        assert panel in [_MepsPanel.PANEL19, _MepsPanel.PANEL20]
         filename = "h181.csv"
-    elif fiscal_year == FiscalYear.FY2016:
-        assert panel == Panel.PANEL21
+    elif fiscal_year == _MepsYear.FY2016:
+        assert panel == _MepsPanel.PANEL21
         filename = "h192.csv"
     else:
         logger.error(f"Unexpected FiscalYear received: {fiscal_year}")
@@ -1202,26 +1559,24 @@ def _fetch_meps_raw_df(panel, fiscal_year):
         "meps",
         filename,
     )
-
+    df: typing.Any = None
     try:
         df = pd.read_csv(filepath, sep=",", na_values=[])
     except IOError as err:
-        logger.error("IOError: {}".format(err))
+        logger.error(f"IOError: {err}")
         logger.error("To use this class, please follow the instructions found here:")
         logger.error(
-            "\n\t{}\n".format(
-                "https://github.com/Trusted-AI/AIF360/tree/master/aif360/data/raw/meps"
-            )
+            f"\n\t{'https://github.com/Trusted-AI/AIF360/tree/master/aif360/data/raw/meps'}\n"
         )
         logger.error(
             f"\n to download and convert the data and place the final {filename} file, as-is, in the folder:"
         )
-        logger.error("\n\t{}\n".format(os.path.abspath(os.path.dirname(filepath))))
+        logger.error(f"\n\t{os.path.abspath(os.path.dirname(filepath))}\n")
         import sys
 
         sys.exit(1)
 
-    df["RACEV2X"] = df.apply(lambda row: _race(row), axis=1)
+    df["RACEV2X"] = df.apply(_race, axis=1)
     df = df.rename(columns={"RACEV2X": "RACE"})
     df = df[df["PANEL"] == panel.value]
 
@@ -1235,11 +1590,11 @@ def _fetch_meps_raw_df(panel, fiscal_year):
 
     df = df.rename(columns={"TOTEXP15": "UTILIZATION"})
     columns_to_drop = set(
-        filter(lambda x: _should_drop_column(x, fiscal_year), df.columns.tolist())
+        (x for x in df.columns.tolist() if _should_drop_column(x, fiscal_year))
     )
     df = df[sorted(set(df.columns.tolist()) - columns_to_drop, key=df.columns.get_loc)]
     X = pd.DataFrame(
-        df, columns=list(filter(lambda x: x != "UTILIZATION", df.columns.tolist()))
+        df, columns=[x for x in df.columns.tolist() if x != "UTILIZATION"]
     ).sort_index()
     y = pd.Series(df["UTILIZATION"], name="UTILIZATION").sort_index()
     fairness_info = {
@@ -1263,7 +1618,7 @@ def _get_pandas_and_fairness_info_from_meps_dataset(dataset):
     return X, y, fairness_info
 
 
-def fetch_meps_panel19_fy2015_df(preprocess=False):
+def fetch_meps_panel19_fy2015_df(preprocess: bool = False):
     """
     Fetch a subset of the `MEPS`_ dataset from aif360 and add fairness info.
 
@@ -1316,10 +1671,10 @@ def fetch_meps_panel19_fy2015_df(preprocess=False):
         dataset = aif360.datasets.MEPSDataset19()
         return _get_pandas_and_fairness_info_from_meps_dataset(dataset)
     else:
-        return _fetch_meps_raw_df(Panel.PANEL19, FiscalYear.FY2015)
+        return _fetch_meps_raw_df(_MepsPanel.PANEL19, _MepsYear.FY2015)
 
 
-def fetch_meps_panel20_fy2015_df(preprocess=False):
+def fetch_meps_panel20_fy2015_df(preprocess: bool = False):
     """
     Fetch a subset of the `MEPS`_ dataset from aif360 and add fairness info.
 
@@ -1372,10 +1727,10 @@ def fetch_meps_panel20_fy2015_df(preprocess=False):
         dataset = aif360.datasets.MEPSDataset20()
         return _get_pandas_and_fairness_info_from_meps_dataset(dataset)
     else:
-        return _fetch_meps_raw_df(Panel.PANEL20, FiscalYear.FY2015)
+        return _fetch_meps_raw_df(_MepsPanel.PANEL20, _MepsYear.FY2015)
 
 
-def fetch_meps_panel21_fy2016_df(preprocess=False):
+def fetch_meps_panel21_fy2016_df(preprocess: bool = False):
     """
     Fetch a subset of the `MEPS`_ dataset from aif360 and add fairness info.
 
@@ -1428,4 +1783,4 @@ def fetch_meps_panel21_fy2016_df(preprocess=False):
         dataset = aif360.datasets.MEPSDataset21()
         return _get_pandas_and_fairness_info_from_meps_dataset(dataset)
     else:
-        return _fetch_meps_raw_df(Panel.PANEL21, FiscalYear.FY2016)
+        return _fetch_meps_raw_df(_MepsPanel.PANEL21, _MepsYear.FY2016)

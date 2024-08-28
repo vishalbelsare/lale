@@ -14,9 +14,11 @@
 
 import sklearn
 import sklearn.tree
+from packaging import version
 
 import lale.docstrings
 import lale.operators
+from lale.lib.sklearn._common_schemas import schema_monotonic_cst_classifier
 
 _hyperparams_schema = {
     "description": "A decision tree classifier.",
@@ -179,7 +181,7 @@ _hyperparams_schema = {
                         {"type": "object", "additionalProperties": {"type": "number"}},
                         {
                             "type": "array",
-                            "item": {
+                            "items": {
                                 "type": "object",
                                 "additionalProperties": {"type": "number"},
                             },
@@ -325,7 +327,7 @@ DecisionTreeClassifier = lale.operators.make_operator(
     sklearn.tree.DecisionTreeClassifier, _combined_schemas
 )
 
-if sklearn.__version__ >= "0.22":
+if lale.operators.sklearn_version >= version.Version("0.22"):
     # old: https://scikit-learn.org/0.20/modules/generated/sklearn.tree.DecisionTreeClassifier.html
     # new: https://scikit-learn.org/0.22/modules/generated/sklearn.tree.DecisionTreeClassifier.html
     from lale.schemas import AnyOf, Bool, Enum, Float
@@ -346,18 +348,52 @@ if sklearn.__version__ >= "0.22":
         set_as_available=True,
     )
 
-if sklearn.__version__ >= "0.24":
+if lale.operators.sklearn_version >= version.Version("0.24"):
     # old: https://scikit-learn.org/0.22/modules/generated/sklearn.tree.DecisionTreeClassifier.html
     # new: https://scikit-learn.org/0.24/modules/generated/sklearn.tree.DecisionTreeClassifier.html
     DecisionTreeClassifier = DecisionTreeClassifier.customize_schema(
         presort=None, set_as_available=True
     )
 
-if sklearn.__version__ >= "1.0":
+if lale.operators.sklearn_version >= version.Version("1.0"):
     # old: https://scikit-learn.org/0.24/modules/generated/sklearn.tree.DecisionTreeClassifier.html
     # new: https://scikit-learn.org/1.0/modules/generated/sklearn.tree.DecisionTreeClassifier.html
     DecisionTreeClassifier = DecisionTreeClassifier.customize_schema(
         min_impurity_split=None, set_as_available=True
+    )
+
+if lale.operators.sklearn_version >= version.Version("1.3"):
+    DecisionTreeClassifier = DecisionTreeClassifier.customize_schema(
+        max_features={
+            "anyOf": [
+                {
+                    "type": "integer",
+                    "minimum": 2,
+                    "laleMaximum": "X/items/maxItems",  # number of columns
+                    "forOptimizer": False,
+                    "description": "Consider max_features features at each split.",
+                },
+                {
+                    "type": "number",
+                    "minimum": 0.0,
+                    "exclusiveMinimum": True,
+                    "maximum": 1.0,
+                    "distribution": "uniform",
+                    "minimumForOptimizer": 0.01,
+                    "default": 0.5,
+                    "description": "max_features is a fraction and int(max_features * n_features) features are considered at each split.",
+                },
+                {"enum": ["sqrt", "log2", None]},
+            ],
+            "default": None,
+            "description": "The number of features to consider when looking for the best split.",
+        },
+        set_as_available=True,
+    )
+
+if lale.operators.sklearn_version >= version.Version("1.4"):
+    DecisionTreeClassifier = DecisionTreeClassifier.customize_schema(
+        monotonic_cst=schema_monotonic_cst_classifier, set_as_available=True
     )
 
 lale.docstrings.set_docstrings(DecisionTreeClassifier)

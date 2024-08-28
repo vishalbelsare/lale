@@ -14,6 +14,8 @@
 
 import unittest
 
+from jsonschema.exceptions import ValidationError
+
 import lale.lib.lale
 import lale.type_checking
 from lale.lib.lale import NoOp
@@ -21,6 +23,7 @@ from lale.lib.sklearn import (
     ExtraTreesRegressor,
     GradientBoostingRegressor,
     RandomForestRegressor,
+    Ridge,
     SGDRegressor,
 )
 
@@ -78,7 +81,6 @@ def create_function_test_regressor(clf_name):
         _ = trained.predict(self.X_test)
 
         # test_with_hyperopt
-        from lale.lib.sklearn.ridge import Ridge
 
         if isinstance(regr, Ridge):  # type: ignore
             from lale.lib.lale import Hyperopt
@@ -87,7 +89,7 @@ def create_function_test_regressor(clf_name):
             trained = hyperopt.fit(self.X_train, self.y_train)
             _ = trained.predict(self.X_test)
 
-    test_regressor.__name__ = "test_{0}".format(clf_name.split(".")[-1])
+    test_regressor.__name__ = f"test_{clf_name.split('.')[-1]}"
     return test_regressor
 
 
@@ -113,13 +115,13 @@ regressors = [
 for clf in regressors:
     setattr(
         TestRegression,
-        "test_{0}".format(clf.split(".")[-1]),
+        f"test_{clf.rsplit('.', maxsplit=1)[-1]}",
         create_function_test_regressor(clf),
     )
 
 
 class TestSpuriousSideConstraintsRegression(unittest.TestCase):
-    # This was prompted buy a bug, keeping it as it may help with support for other sklearn versions
+    # This was prompted by a bug, keeping it as it may help with support for other sklearn versions
     def setUp(self):
         from sklearn.datasets import make_regression
         from sklearn.model_selection import train_test_split
@@ -130,18 +132,17 @@ class TestSpuriousSideConstraintsRegression(unittest.TestCase):
         self.X_train, self.X_test, self.y_train, self.y_test = train_test_split(X, y)
 
     def test_gradient_boost_regressor(self):
-
         reg = GradientBoostingRegressor(
             alpha=0.9789984970831765,
             criterion="friedman_mse",
             init=None,
             learning_rate=0.1,
-            loss="ls",
+            loss="squared_error",
         )
         reg.fit(self.X_train, self.y_train)
 
     def test_sgd_regressor(self):
-        reg = SGDRegressor(loss="squared_loss", epsilon=0.2)
+        reg = SGDRegressor(loss="squared_error", epsilon=0.2)
         reg.fit(self.X_train, self.y_train)
 
     def test_sgd_regressor_1(self):
@@ -214,4 +215,38 @@ class TestFriedmanMSE(unittest.TestCase):
                 verbose=0,
                 warm_start=False,
             )
+            reg.fit(self.X_train, self.y_train)
+
+
+class TestRidge(unittest.TestCase):
+    # This was prompted by a bug, keeping it as it may help with support for other sklearn versions
+    def setUp(self):
+        from sklearn.datasets import make_regression
+        from sklearn.model_selection import train_test_split
+
+        X, y = make_regression(
+            n_features=4, n_informative=2, random_state=0, shuffle=False
+        )
+        self.X_train, self.X_test, self.y_train, self.y_test = train_test_split(X, y)
+
+    def test_positive(self):
+        import sklearn
+
+        from lale.settings import set_disable_data_schema_validation
+
+        set_disable_data_schema_validation(False)
+        if sklearn.__version__ > "1.0":
+            reg = Ridge(solver="lbfgs", positive=True)
+            reg.fit(self.X_train, self.y_train)
+
+            with self.assertRaises(ValidationError):
+                reg = Ridge(solver="saga", positive=True)
+
+            reg = Ridge(solver="auto", positive=True)
+            reg.fit(self.X_train, self.y_train)
+
+            with self.assertRaises(ValidationError):
+                reg = Ridge(solver="lbfgs", positive=False)
+
+            reg = Ridge(solver="auto", positive=False)
             reg.fit(self.X_train, self.y_train)

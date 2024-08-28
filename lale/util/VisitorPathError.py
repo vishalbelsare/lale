@@ -16,7 +16,6 @@ from typing import Any, Iterator, List, Optional
 
 
 class VisitorPathError(ValueError):
-
     _path: List[Any]
 
     def __init__(self, path: List[Any], message: Optional[str] = None):
@@ -35,7 +34,7 @@ class VisitorPathError(ValueError):
         return super().__str__()
 
     def path_string(self) -> str:
-        return "->".join(map(str, self.path))
+        return "->".join((str(x) for x in self.path))
 
     def __str__(self):
         pstr = self.path_string()

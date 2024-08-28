@@ -16,28 +16,30 @@ import ast
 import copy
 import importlib
 import logging
-import os
-import re
-import sys
 import time
 import traceback
+from importlib import util
 from typing import (
     TYPE_CHECKING,
     Any,
     Dict,
     Iterable,
     List,
+    Literal,
     Mapping,
     Optional,
+    Set,
     Tuple,
     TypeVar,
     Union,
+    overload,
 )
 
 import numpy as np
 import pandas as pd
 import scipy.sparse
 import sklearn.pipeline
+from numpy.random import RandomState
 from sklearn.metrics import accuracy_score, check_scoring, log_loss
 from sklearn.model_selection import StratifiedKFold
 from sklearn.utils.metaestimators import _safe_split
@@ -51,17 +53,19 @@ try:
 except ImportError:
     torch_installed = False
 
-try:
+
+spark_loader = util.find_spec("pyspark")
+spark_installed = spark_loader is not None
+if spark_installed:
     from pyspark.sql.dataframe import DataFrame as spark_df
-
-    spark_installed = True
-
-except ImportError:
-    spark_installed = False
 
 logger = logging.getLogger(__name__)
 
 LALE_NESTED_SPACE_KEY = "__lale_nested_space"
+
+astype_type = Literal["lale", "sklearn"]
+datatype_param_type = Literal["pandas", "spark"]
+randomstate_type = Union[RandomState, int, None]
 
 
 def make_nested_hyperopt_space(sub_space):
@@ -70,7 +74,7 @@ def make_nested_hyperopt_space(sub_space):
 
 def assignee_name(level=1) -> Optional[str]:
     tb = traceback.extract_stack()
-    file_name, line_number, function_name, text = tb[-(level + 2)]
+    file_name, _line_number, _function_name, text = tb[-(level + 2)]
     try:
         tree = ast.parse(text, file_name)
     except SyntaxError:
@@ -89,7 +93,7 @@ def assignee_name(level=1) -> Optional[str]:
 
 def arg_name(pos=0, level=1) -> Optional[str]:
     tb = traceback.extract_stack()
-    file_name, line_number, function_name, text = tb[-(level + 2)]
+    file_name, _line_number, _function_name, text = tb[-(level + 2)]
     try:
         tree = ast.parse(text, file_name)
     except SyntaxError:
@@ -109,30 +113,26 @@ def arg_name(pos=0, level=1) -> Optional[str]:
 
 
 def data_to_json(data, subsample_array: bool = True) -> Union[list, dict, int, float]:
-    if type(data) is tuple:
+    if isinstance(data, tuple):
         # convert to list
         return [data_to_json(elem, subsample_array) for elem in data]
-    if type(data) is list:
+    if isinstance(data, list):
         return [data_to_json(elem, subsample_array) for elem in data]
-    elif type(data) is dict:
+    elif isinstance(data, dict):
         return {key: data_to_json(data[key], subsample_array) for key in data}
     elif isinstance(data, np.ndarray):
         return ndarray_to_json(data, subsample_array)
-    elif type(data) is scipy.sparse.csr_matrix:
+    elif isinstance(data, scipy.sparse.csr_matrix):
         return ndarray_to_json(data.toarray(), subsample_array)
-    elif isinstance(data, pd.DataFrame) or isinstance(data, pd.Series):
+    elif isinstance(data, (pd.DataFrame, pd.Series)):
         np_array = data.values
         return ndarray_to_json(np_array, subsample_array)
     elif torch_installed and isinstance(data, torch.Tensor):
         np_array = data.detach().numpy()
         return ndarray_to_json(np_array, subsample_array)
-    elif (
-        isinstance(data, np.int64)
-        or isinstance(data, np.int32)
-        or isinstance(data, np.int16)
-    ):
+    elif isinstance(data, (np.int64, np.int32, np.int16)):  # type: ignore
         return int(data)
-    elif isinstance(data, np.float64) or isinstance(data, np.float32):
+    elif isinstance(data, (np.float32, np.float64)):  # type: ignore
         return float(data)
     else:
         return data
@@ -143,7 +143,9 @@ def is_empty_dict(val) -> bool:
 
 
 def dict_without(orig_dict: Dict[str, Any], key: str) -> Dict[str, Any]:
-    return {k: orig_dict[k] for k in orig_dict if k != key}
+    if key not in orig_dict:
+        return orig_dict
+    return {k: v for k, v in orig_dict.items() if k != key}
 
 
 def json_lookup(ptr, jsn, default=None):
@@ -170,12 +172,7 @@ def ndarray_to_json(arr: np.ndarray, subsample_array: bool = True) -> Union[list
 
     def subarray_to_json(indices: Tuple[int, ...]) -> Any:
         if len(indices) == len(arr.shape):
-            if (
-                isinstance(arr[indices], bool)
-                or isinstance(arr[indices], int)
-                or isinstance(arr[indices], float)
-                or isinstance(arr[indices], str)
-            ):
+            if isinstance(arr[indices], (bool, int, float, str)):
                 return arr[indices]
             elif np.issubdtype(arr.dtype, np.bool_):
                 return bool(arr[indices])
@@ -228,7 +225,7 @@ def split_with_schemas(estimator, all_X, all_y, indices, train_indices=None):
 
 def fold_schema(X, y, cv=1, is_classifier=True):
     def fold_schema_aux(data, n_rows):
-        orig_schema = lale.datasets.data_schemas.to_schema(data)
+        orig_schema = lale.datasets.data_schemas._to_schema(data)
         aux_result = {**orig_schema, "minItems": n_rows, "maxItems": n_rows}
         return aux_result
 
@@ -254,7 +251,14 @@ def fold_schema(X, y, cv=1, is_classifier=True):
 
 
 def cross_val_score_track_trials(
-    estimator, X, y=None, scoring=accuracy_score, cv=5, args_to_scorer=None
+    estimator,
+    X,
+    y=None,
+    scoring: Any = accuracy_score,
+    cv: Any = 5,
+    args_to_scorer: Optional[Dict[str, Any]] = None,
+    args_to_cv: Optional[Dict[str, Any]] = None,
+    **fit_params,
 ):
     """
     Use the given estimator to perform fit and predict for splits defined by 'cv' and compute the given score on
@@ -264,7 +268,8 @@ def cross_val_score_track_trials(
     ----------
 
     estimator: A valid sklearn_wrapper estimator
-    X, y: Valid data and target values that work with the estimator
+    X: Valid data that works with the estimator
+    y: Valid target that works with the estimator
     scoring: string or a scorer object created using
         https://scikit-learn.org/stable/modules/generated/sklearn.metrics.make_scorer.html#sklearn.metrics.make_scorer.
         A string from sklearn.metrics.SCORERS.keys() can be used or a scorer created from one of
@@ -277,6 +282,9 @@ def cross_val_score_track_trials(
         Note that any of the iterators from https://scikit-learn.org/stable/modules/cross_validation.html#cross-validation-iterators can be used here.
     args_to_scorer: A dictionary of additional keyword arguments to pass to the scorer.
                 Used for cases where the scorer has a signature such as ``scorer(estimator, X, y, **kwargs)``.
+    args_to_cv: A dictionary of additional keyword arguments to pass to the split method of cv.
+                This is only applicable when cv is not an integer.
+    fit_params: Additional parameters that should be passed when calling fit on the estimator
     Returns
     -------
         cv_results: a list of scores corresponding to each cross validation fold
@@ -286,11 +294,13 @@ def cross_val_score_track_trials(
 
     if args_to_scorer is None:
         args_to_scorer = {}
+    if args_to_cv is None:
+        args_to_cv = {}
     scorer = check_scoring(estimator, scoring=scoring)
     cv_results: List[float] = []
     log_loss_results = []
     time_results = []
-    for train, test in cv.split(X, y):
+    for train, test in cv.split(X, y, **args_to_cv):
         X_train, y_train = split_with_schemas(estimator, X, y, train)
         X_test, y_test = split_with_schemas(estimator, X, y, test, train)
         start = time.time()
@@ -299,7 +309,7 @@ def cross_val_score_track_trials(
         #      with edges=None, so the resulting topology is incorrect.
         #  (2) For Lale individual operators, the fit() method already
         #      clones the impl object, so cloning again is redundant.
-        trained = estimator.fit(X_train, y_train)
+        trained = estimator.fit(X_train, y_train, **fit_params)
         score_value = scorer(trained, X_test, y_test, **args_to_scorer)
         execution_time = time.time() - start
         # not all estimators have predict probability
@@ -319,7 +329,7 @@ def cross_val_score_track_trials(
     return result
 
 
-def cross_val_score(estimator, X, y=None, scoring=accuracy_score, cv=5):
+def cross_val_score(estimator, X, y=None, scoring: Any = accuracy_score, cv: Any = 5):
     """
     Use the given estimator to perform fit and predict for splits defined by 'cv' and compute the given score on
     each of the splits.
@@ -328,7 +338,8 @@ def cross_val_score(estimator, X, y=None, scoring=accuracy_score, cv=5):
     ----------
 
     estimator: A valid sklearn_wrapper estimator
-    X, y: Valid data and target values that work with the estimator
+    X: Valid data value that works with the estimator
+    y: Valid target value that works with the estimator
     scoring: a scorer object from sklearn.metrics (https://scikit-learn.org/stable/modules/classes.html#module-sklearn.metrics)
         Default value is accuracy_score.
     cv: an integer or an object that has a split function as a generator yielding (train, test) splits as arrays of indices.
@@ -383,7 +394,6 @@ def to_graphviz(
     lale_operator: "lale.operators.Operator",
     ipython_display: bool = True,
     call_depth: int = 1,
-    **dot_graph_attr,
 ):
     import lale.json_operator
     import lale.operators
@@ -392,22 +402,8 @@ def to_graphviz(
     if not isinstance(lale_operator, lale.operators.Operator):
         raise TypeError("The input to to_graphviz needs to be a valid LALE operator.")
     jsn = lale.json_operator.to_json(lale_operator, call_depth=call_depth + 1)
-    dot = lale.visualize.json_to_graphviz(jsn, ipython_display, dot_graph_attr)
+    dot = lale.visualize.json_to_graphviz(jsn, ipython_display)
     return dot
-
-
-def println_pos(message, out_file=sys.stdout):
-    tb = traceback.extract_stack()[-2]
-    match = re.search(r"<ipython-input-([0-9]+)-", tb[0])
-    if match:
-        pos = "notebook cell [{}] line {}".format(match[1], tb[1])
-    else:
-        pos = "{}:{}".format(tb[0], tb[1])
-    strtime = time.strftime("%Y-%m-%d_%H-%M-%S")
-    to_log = "{}: {} {}".format(pos, strtime, message)
-    print(to_log, file=out_file)
-    if match:
-        os.system("echo {}".format(to_log))
 
 
 def instantiate_from_hyperopt_search_space(obj_hyperparams, new_hyperparams):
@@ -512,7 +508,7 @@ def create_instance_from_hyperopt_search_space(
         all_hyperparams = {**obj_hyperparams, **new_hyperparams}
         return lale_object(**all_hyperparams)
     elif isinstance(lale_object, BasePipeline):
-        steps = lale_object.steps()
+        steps = lale_object.steps_list()
         if len(hyperparams) != len(steps):
             raise ValueError(
                 "The number of steps in the hyper-parameter space does not match the number of steps in the pipeline."
@@ -538,7 +534,7 @@ def create_instance_from_hyperopt_search_space(
         except KeyError as e:
             raise ValueError(
                 "An edge was found with an endpoint that is not a step (" + str(e) + ")"
-            )
+            ) from e
 
         return TrainablePipeline(op_instances, trainable_edges, ordered=True)  # type: ignore
     elif isinstance(lale_object, OperatorChoice):
@@ -546,7 +542,7 @@ def create_instance_from_hyperopt_search_space(
         # corresponding to the choice made, the only key is the index of the step and the value is
         # the params corresponding to that step.
         step_index: int
-        choices = lale_object.steps()
+        choices = lale_object.steps_list()
 
         if len(choices) == 1:
             step_index = 0
@@ -559,113 +555,255 @@ def create_instance_from_hyperopt_search_space(
         assert False, f"Unknown operator type: {type(lale_object)}"
 
 
-def import_from_sklearn_pipeline(sklearn_pipeline, fitted=True):
-    # For all pipeline steps, identify equivalent lale wrappers if present,
-    # if not, call make operator on sklearn classes and create a lale pipeline.
-    # def get_equivalent_lale_op(sklearn_obj, fitted):
-    import lale.operators
-    import lale.type_checking
+def find_lale_wrapper(sklearn_obj: Any) -> Optional[Any]:
+    """
+    :param sklearn_obj: An sklearn compatible object that may have a lale wrapper
+    :return: The lale wrapper type, or None if one could not be found
+    """
+    from .operator_wrapper import get_lale_wrapper_modules
 
-    sklearn_obj = sklearn_pipeline
-    if isinstance(sklearn_obj, lale.operators.TrainableIndividualOp) and fitted:
-        if hasattr(sklearn_obj, "_trained"):
+    module_names = get_lale_wrapper_modules()
+
+    class_name = sklearn_obj.__class__.__name__
+    for module_name in module_names:
+        try:
+            module = importlib.import_module(module_name)
+        except ModuleNotFoundError:
+            continue
+        try:
+            class_ = getattr(module, class_name)
+            return class_
+        except AttributeError:
+            continue
+    return None
+
+
+def _import_from_sklearn_inplace_helper(
+    sklearn_obj, fitted: bool = True, is_nested=False
+):
+    """
+    This method take an object and tries to wrap sklearn objects
+    (at the top level or contained within hyperparameters of other
+    sklearn objects).
+    It will modify the object to add in the appropriate lale wrappers.
+    It may also return a wrapper or different object than given.
+
+    :param sklearn_obj: the object that we are going to try and wrap
+    :param fitted: should we return a TrainedOperator
+    :param is_hyperparams: is this a nested invocation (which allows for returning
+    a Trainable operator even if fitted is set to True)
+    """
+
+    @overload
+    def import_nested_params(
+        orig_hyperparams: dict, partial_dict: bool
+    ) -> Optional[dict]: ...
+
+    @overload
+    def import_nested_params(orig_hyperparams: Any, partial_dict: bool) -> Any: ...
+
+    def import_nested_params(orig_hyperparams: Any, partial_dict: bool = False):
+        """
+        look through lists/tuples/dictionaries for sklearn compatible objects to import.
+        :param orig_hyperparams: the input to recursively look through for sklearn compatible objects
+        :param partial_dict: If this is True and the input is a dictionary, the returned dictionary will only have the
+        keys with modified values
+        :return: Either a modified version of the input or None if nothing was changed
+        """
+        if isinstance(orig_hyperparams, (tuple, list)):
+            new_list: list = []
+            list_modified: bool = False
+            for e in orig_hyperparams:
+                new_e = import_nested_params(e, partial_dict=False)
+                if new_e is None:
+                    new_list.append(e)
+                else:
+                    new_list.append(new_e)
+                    list_modified = True
+            if not list_modified:
+                return None
+            if isinstance(orig_hyperparams, tuple):
+                return tuple(new_list)
+            else:
+                return new_list
+        if isinstance(orig_hyperparams, dict):
+            new_dict: dict = {}
+            dict_modified: bool = False
+            for k, v in orig_hyperparams.items():
+                new_v = import_nested_params(v, partial_dict=False)
+                if new_v is None:
+                    if not partial_dict:
+                        new_dict[k] = v
+                else:
+                    new_dict[k] = new_v
+                    dict_modified = True
+            if not dict_modified:
+                return None
+            return new_dict
+        if isinstance(orig_hyperparams, object) and hasattr(
+            orig_hyperparams, "get_params"
+        ):
+            newobj = _import_from_sklearn_inplace_helper(
+                orig_hyperparams, fitted=fitted, is_nested=True
+            )  # allow nested_op to be trainable
+            if newobj is orig_hyperparams:
+                return None
+            return newobj
+        return None
+
+    if sklearn_obj is None:
+        return None
+
+    if isinstance(sklearn_obj, lale.operators.TrainedIndividualOp):
+        # if fitted=False, we may want to return a TrainedIndidivualOp
+        return sklearn_obj
+    # if the object is a trainable operator, we clean that up
+    if isinstance(sklearn_obj, lale.operators.TrainableIndividualOp) and hasattr(
+        sklearn_obj, "_trained"
+    ):
+        if fitted:
+            # get rid of the indirection, and just return the trained operator directly
             return sklearn_obj._trained
-        elif not hasattr(
-            sklearn_obj._impl_instance(), "fit"
+        else:
+            # since we are not supposed to be trained, delete the trained part
+            delattr(sklearn_obj, "_trained")  # delete _trained before returning
+            return sklearn_obj
+    if isinstance(sklearn_obj, lale.operators.Operator):
+        if (
+            fitted and is_nested or not hasattr(sklearn_obj._impl_instance(), "fit")
         ):  # Operators such as NoOp do not have a fit, so return them as is.
             return sklearn_obj
-        else:
+        if fitted:
             raise ValueError(
-                """The input pipeline has an operator that is not trained and fitted is set to True,
+                f"""The input pipeline has an operator {sklearn_obj} that is not trained and fitted is set to True,
                 please pass fitted=False if you want a trainable pipeline as output."""
             )
-    elif isinstance(sklearn_obj, lale.operators.Operator):
+        # the lale operator is not trained and fitted=False
         return sklearn_obj
 
-    if isinstance(sklearn_pipeline, sklearn.pipeline.Pipeline):
-        nested_pipeline_steps = sklearn_pipeline.named_steps.values()
-        nested_pipeline_lale_objects = [
-            import_from_sklearn_pipeline(nested_pipeline_step, fitted=fitted)
-            for nested_pipeline_step in nested_pipeline_steps
-        ]
-        lale_op_obj = lale.operators.make_pipeline(*nested_pipeline_lale_objects)
-    elif isinstance(sklearn_pipeline, sklearn.pipeline.FeatureUnion):
-        transformer_list = sklearn_pipeline.transformer_list
+    # special case for FeatureUnion.
+    # An alternative would be to (like for sklearn pipeline)
+    # create a lale wrapper for the sklearn feature union
+    # as a higher order operator
+    # and then the special case would be just to throw away the outer wrapper
+    # Note that lale union does not currently support weights or other features of feature union.
+    if isinstance(sklearn_obj, sklearn.pipeline.FeatureUnion):
+        transformer_list = sklearn_obj.transformer_list
         concat_predecessors = [
-            import_from_sklearn_pipeline(transformer[1], fitted=fitted)
+            _import_from_sklearn_inplace_helper(
+                transformer[1], fitted=fitted, is_nested=is_nested
+            )
             for transformer in transformer_list
         ]
-        lale_op_obj = lale.operators.make_union(*concat_predecessors)
-    else:
-        # Validate that the sklearn_obj is a valid sklearn-compatible object
-        if sklearn_obj is None or not hasattr(sklearn_obj, "get_params"):
-            raise ValueError(
-                f"The input pipeline has a step {sklearn_obj} that is not scikit-learn compatible."
-            )
-        orig_hyperparams = sklearn_obj.get_params(deep=False)
-        higher_order = False
-        for hp_name, hp_val in orig_hyperparams.items():
-            higher_order = higher_order or hasattr(hp_val, "get_params")
-        if higher_order:
-            hyperparams = {}
-            for hp_name, hp_val in orig_hyperparams.items():
-                if hasattr(hp_val, "get_params"):
-                    nested_op = import_from_sklearn_pipeline(hp_val, fitted)
-                    hyperparams[hp_name] = nested_op
-                else:
-                    hyperparams[hp_name] = hp_val
-        else:
-            hyperparams = orig_hyperparams
+        return lale.operators.make_union(*concat_predecessors)
 
-        module_names = [
-            "lale.lib.sklearn",
-            "lale.lib.autoai_libs",
-            "lale.lib.xgboost",
-            "lale.lib.lightgbm",
-            "lale.lib.snapml",
-        ]
+    if not hasattr(sklearn_obj, "get_params"):
+        # if it does not have a get_params method,
+        # then we just return it without trying to wrap it
+        return sklearn_obj
 
+    class_ = find_lale_wrapper(sklearn_obj)
+    if not class_:
+        return sklearn_obj  # Return the original object
+
+    # next, we need to figure out what the right hyperparameters are
+    orig_hyperparams = sklearn_obj.get_params(deep=False)
+
+    hyperparams = import_nested_params(orig_hyperparams, partial_dict=True)
+    if hyperparams:
+        # if we have updated any of the hyperparameters then we modify them in the actual sklearn object
         try:
-            import autoai_ts_libs  # type: ignore # noqa
-
-            module_names.append("lale.lib.autoai_ts_libs")
-        except ImportError:
+            new_obj = sklearn_obj.set_params(**hyperparams)
+            if new_obj is not None:
+                sklearn_obj = new_obj
+        except NotImplementedError:
+            # if the set_params method does not work, then do our best
             pass
 
-        lale_wrapper_found = False
-        class_name = sklearn_obj.__class__.__name__
-        for module_name in module_names:
-            try:
-                module = importlib.import_module(module_name)
-            except ModuleNotFoundError:
-                continue
-            try:
-                class_ = getattr(module, class_name)
-                lale_wrapper_found = True
-                break
-            except AttributeError:
-                continue
-        else:
-            class_ = lale.operators.make_operator(sklearn_obj, name=class_name)
+        all_new_hyperparams = {**orig_hyperparams, **hyperparams}
+    else:
+        all_new_hyperparams = orig_hyperparams
 
-        if (
-            not fitted
-        ):  # If fitted is False, we do not want to return a Trained operator.
-            lale_op = class_
-        else:
-            lale_op = lale.operators.TrainedIndividualOp(
-                class_._name, class_._impl, class_._schemas, None, _lale_trained=True
-            )
-        class_ = lale_op(**hyperparams)
-        lale_op_obj = class_
-        if lale_wrapper_found and hasattr(class_._impl_instance(), "_wrapped_model"):
-            wrapped_model = copy.deepcopy(sklearn_obj)
-            class_._impl_instance()._wrapped_model = wrapped_model
-        else:  # If there is no lale wrapper, there is no _wrapped_model
-            class_._impl = copy.deepcopy(sklearn_obj)
-            class_._impl_class_ = class_._impl.__class__
-            lale_op_obj = class_
+    # now, we get the lale operator for the wrapper, with the corresponding hyperparameters
+    if not fitted:  # If fitted is False, we do not want to return a Trained operator.
+        lale_op_obj_base = class_
+    else:
+        lale_op_obj_base = lale.operators.TrainedIndividualOp(
+            class_._name,
+            class_._impl,
+            class_._schemas,
+            None,
+            _lale_trained=True,
+        )
+
+    lale_op_obj = lale_op_obj_base(**all_new_hyperparams)
+    from lale.lib.sklearn import Pipeline as LaleSKPipelineWrapper
+
+    # If this is a scklearn pipeline, then we want to discard the outer wrapper
+    # and just return a lale pipeline
+    if isinstance(lale_op_obj, LaleSKPipelineWrapper):  # type: ignore
+        return lale_op_obj.shallow_impl._pipeline
+
+    # at this point, the object's hyper-parameters are modified as needed
+    # and our wrapper is initialized with the correct hyperparameters.
+    # Now we need to replace the wrapper impl with our (possibly modified)
+    # sklearn object
+    cl_shallow_impl = lale_op_obj.shallow_impl
+
+    if hasattr(cl_shallow_impl, "_wrapped_model"):
+        cl_shallow_impl._wrapped_model = sklearn_obj
+    else:
+        lale_op_obj._impl = sklearn_obj
+        lale_op_obj._impl_class_ = sklearn_obj.__class__
+
     return lale_op_obj
+
+
+def import_from_sklearn(sklearn_obj: Any, fitted: bool = True, in_place: bool = False):
+    """
+    This method take an object and tries to wrap sklearn objects
+    (at the top level or contained within hyperparameters of other
+    sklearn objects).
+    It will modify the object to add in the appropriate lale wrappers.
+    It may also return a wrapper or different object than given.
+
+    :param sklearn_obj: the object that we are going to try and wrap
+    :param fitted: should we return a TrainedOperator
+    :param in_place: should we try to mutate what we can in place, or should we
+           aggressively deepcopy everything
+    :return: The wrapped object (or the input object if we could not wrap it)
+    """
+    obj = sklearn_obj
+    if in_place:
+        obj = sklearn_obj
+    else:
+        obj = copy.deepcopy(sklearn_obj)
+    return _import_from_sklearn_inplace_helper(obj, fitted=fitted, is_nested=False)
+
+
+def import_from_sklearn_pipeline(sklearn_pipeline: Any, fitted: bool = True):
+    """
+    Note: Same as import_from_sklearn.  This alternative name exists for backwards compatibility.
+
+    This method take an object and tries to wrap sklearn objects
+    (at the top level or contained within hyperparameters of other
+    sklearn objects).
+    It will modify the object to add in the appropriate lale wrappers.
+    It may also return a wrapper or different object than given.
+
+    :param sklearn_pipeline: the object that we are going to try and wrap
+    :param fitted: should we return a TrainedOperator
+    :return: The wrapped object (or the input object if we could not wrap it)
+
+    """
+    op = import_from_sklearn(sklearn_pipeline, fitted=fitted, in_place=False)
+
+    from typing import cast
+
+    from lale.operators import TrainableOperator
+
+    # simplify using the returned value in the common case
+    return cast(TrainableOperator, op)
 
 
 class val_wrapper:
@@ -705,6 +843,8 @@ def append_batch(data, batch_data):
     elif torch_installed and isinstance(data, torch.Tensor):
         if isinstance(batch_data, torch.Tensor):
             return torch.cat((data, batch_data))
+    elif isinstance(data, (pd.Series, pd.DataFrame)):
+        return pd.concat([data, batch_data], axis=0)
     try:
         import h5py
 
@@ -714,10 +854,18 @@ def append_batch(data, batch_data):
     except ModuleNotFoundError:
         pass
 
-    # TODO:Handle dataframes
+    raise ValueError(
+        f"{type(data)} is unsupported. Supported types are np.ndarray, torch.Tensor and h5py file"
+    )
 
 
-def create_data_loader(X, y=None, batch_size=1, num_workers=0):
+def create_data_loader(
+    X: Any,
+    y: Any = None,
+    batch_size: int = 1,
+    num_workers: int = 0,
+    shuffle: bool = True,
+):
     """A function that takes a dataset as input and outputs a Pytorch dataloader.
 
     Parameters
@@ -734,6 +882,8 @@ def create_data_loader(X, y=None, batch_size=1, num_workers=0):
         Number of samples in each batch, by default 1
     num_workers : int, optional
         Number of workers used by the data loader, by default 0
+    shuffle: boolean, optional, default True
+        Whether to use SequentialSampler or RandomSampler for creating batches
 
     Returns
     -------
@@ -744,52 +894,24 @@ def create_data_loader(X, y=None, batch_size=1, num_workers=0):
     TypeError
         Raises a TypeError if the input format is not supported.
     """
-    import torch
     from torch.utils.data import DataLoader, Dataset, TensorDataset
 
     from lale.util.batch_data_dictionary_dataset import BatchDataDict
     from lale.util.hdf5_to_torch_dataset import HDF5TorchDataset
-    from lale.util.numpy_to_torch_dataset import NumpyTorchDataset
+    from lale.util.numpy_torch_dataset import NumpyTorchDataset, numpy_collate_fn
+    from lale.util.pandas_torch_dataset import PandasTorchDataset, pandas_collate_fn
 
     collate_fn = None
     worker_init_fn = None
 
-    def numpy_collate_fn(batch):
-        return_X = None
-        return_y = None
-        for item in batch:
-            if isinstance(item, tuple):
-                if return_X is None:
-                    return_X = item[0]
-                else:
-                    return_X = np.vstack((return_X, item[0]))
-                if return_y is None:
-                    return_y = item[1]
-                else:
-                    return_y = np.vstack((return_y, item[1]))
-            else:
-                if return_X is None:
-                    return_X = item
-                else:
-                    return_X = np.vstack((return_X, item))
-        if return_y is not None:
-            if len(return_y.shape) > 1 and return_y.shape[1] == 1:
-                return_y = np.reshape(return_y, (len(return_y),))
-            return return_X, return_y
-        else:
-            return return_X
-
-    if isinstance(X, Dataset):
+    if isinstance(X, Dataset) and not isinstance(X, BatchDataDict):
         dataset = X
     elif isinstance(X, pd.DataFrame):
-        X = X.to_numpy()
-        if isinstance(y, pd.Series):
-            y = y.to_numpy()
-        dataset = NumpyTorchDataset(X, y)
-        collate_fn = numpy_collate_fn
-    elif isinstance(X, scipy.sparse.csr.csr_matrix):
+        dataset = PandasTorchDataset(X, y)
+        collate_fn = pandas_collate_fn
+    elif isinstance(X, scipy.sparse.csr_matrix):
         # unfortunately, NumpyTorchDataset won't accept a subclass of np.ndarray
-        X = X.toarray()
+        X = X.toarray()  # type: ignore
         if isinstance(y, lale.datasets.data_schemas.NDArrayWithSchema):
             y = y.view(np.ndarray)
         dataset = NumpyTorchDataset(X, y)
@@ -812,7 +934,9 @@ def create_data_loader(X, y=None, batch_size=1, num_workers=0):
                 0
             ]  # because BatchDataDict's get_item returns a batch, so no collate is required.
 
-        return DataLoader(dataset, batch_size=1, collate_fn=my_collate_fn)
+        return DataLoader(
+            dataset, batch_size=1, collate_fn=my_collate_fn, shuffle=shuffle
+        )
     elif isinstance(X, dict):  # Assumed that it is data indexed by batch number
         if "dataset" in X:
             dataset = X["dataset"]
@@ -828,7 +952,7 @@ def create_data_loader(X, y=None, batch_size=1, num_workers=0):
         dataset = TensorDataset(X)
     else:
         raise TypeError(
-            "Can not create a data loader for a dataset with type {}".format(type(X))
+            f"Can not create a data loader for a dataset with type {type(X)}"
         )
     return DataLoader(
         dataset,
@@ -836,6 +960,7 @@ def create_data_loader(X, y=None, batch_size=1, num_workers=0):
         collate_fn=collate_fn,
         num_workers=num_workers,
         worker_init_fn=worker_init_fn,
+        shuffle=shuffle,
     )
 
 
@@ -889,9 +1014,9 @@ def write_batch_output_to_file(
                 name="y", shape=h5_labels_shape, chunks=True, compression="gzip"
             )
     dataset = file_obj["X"]
-    dataset[
-        batch_idx * len(batch_out_X) : (batch_idx + 1) * len(batch_out_X)
-    ] = batch_out_X
+    dataset[batch_idx * len(batch_out_X) : (batch_idx + 1) * len(batch_out_X)] = (
+        batch_out_X
+    )
     if batch_out_y is not None or batch_y is not None:
         labels = file_obj["y"]
         if batch_out_y is not None:
@@ -1010,8 +1135,7 @@ def make_array_index_name(index, is_tuple: bool = False):
 
 
 def is_numeric_structure(structure_type: str):
-
-    if structure_type == "list" or structure_type == "tuple":
+    if structure_type in ["list", "tuple"]:
         return True
     elif structure_type == "dict":
         return False
@@ -1088,17 +1212,128 @@ def _is_ast_constant(expr):
 
 
 def _is_ast_subs_or_attr(expr):
-    return isinstance(expr, ast.Subscript) or isinstance(expr, ast.Attribute)
+    return isinstance(expr, (ast.Subscript, ast.Attribute))
 
 
-def _is_df(d):
-    return isinstance(d, pd.DataFrame) or isinstance(d, spark_df)
+def _is_ast_call(expr):
+    return isinstance(expr, ast.Call)
+
+
+def _is_ast_name(expr):
+    return isinstance(expr, ast.Name)
+
+
+def _ast_func_id(expr):
+    if isinstance(expr, ast.Name):
+        return expr.id
+    else:
+        raise ValueError("function name expected")
+
+
+def _is_df(df):
+    return _is_pandas_df(df) or _is_spark_df(df)
+
+
+def _is_pandas_series(df):
+    return isinstance(df, pd.Series)
 
 
 def _is_pandas_df(df):
     return isinstance(df, pd.DataFrame)
 
 
+def _is_pandas(df):
+    return isinstance(df, (pd.Series, pd.DataFrame))
+
+
 def _is_spark_df(df):
     if spark_installed:
-        return isinstance(df, spark_df)
+        return isinstance(df, lale.datasets.data_schemas.SparkDataFrameWithIndex)
+    else:
+        return False
+
+
+def _is_spark_df_without_index(df):
+    if spark_installed:
+        return isinstance(df, spark_df) and not _is_spark_df(df)
+    else:
+        return False
+
+
+def _ensure_pandas(df) -> pd.DataFrame:
+    if _is_spark_df(df):
+        return df.toPandas()
+    assert _is_pandas(df), type(df)
+    return df
+
+
+def _get_subscript_value(subscript_expr):
+    if isinstance(subscript_expr.slice, ast.Constant):  # for Python 3.9
+        subscript_value = subscript_expr.slice.value
+    else:
+        subscript_value = subscript_expr.slice.value.s  # type: ignore
+    return subscript_value
+
+
+class GenSym:
+    def __init__(self, names: Set[str]):
+        self._names = names
+
+    def __call__(self, prefix):
+        if prefix in self._names:
+            suffix = 0
+            while True:
+                result = f"{prefix}_{suffix}"
+                if result not in self._names:
+                    break
+                suffix += 1
+        else:
+            result = prefix
+        self._names |= {result}
+        return result
+
+
+def get_sklearn_estimator_name() -> str:
+    """Some higher order sklearn operators changed the name of the nested estimatator in later versions.
+    This returns the appropriate version dependent paramater name
+    """
+    from packaging import version
+
+    import lale.operators
+
+    if lale.operators.sklearn_version < version.Version("1.2"):
+        return "base_estimator"
+    else:
+        return "estimator"
+
+
+def with_fixed_estimator_name(**kwargs):
+    """Some higher order sklearn operators changed the name of the nested estimator in later versions.
+    This fixes up the arguments, renaming estimator and base_estimator appropriately.
+    """
+
+    if "base_estimator" in kwargs or "estimator" in kwargs:
+        from packaging import version
+
+        import lale.operators
+
+        if lale.operators.sklearn_version < version.Version("1.2"):
+            return {
+                "base_estimator" if k == "estimator" else k: v
+                for k, v in kwargs.items()
+            }
+        else:
+            return {
+                "estimator" if k == "base_estimator" else k: v
+                for k, v in kwargs.items()
+            }
+
+    return kwargs
+
+
+def get_estimator_param_name_from_hyperparams(hyperparams):
+    be = hyperparams.get("base_estimator", "deprecated")
+    if be == "deprecated" or (be is None and "estimator" in hyperparams):
+        return "estimator"
+    else:
+        return "base_estimator"

@@ -29,7 +29,6 @@ logger.setLevel(logging.ERROR)
 
 
 class _OptimizeSuffix:
-
     _prefix: Optional[lale.operators.TrainedOperator]
     _optimizer: lale.operators.Operator
 
@@ -79,8 +78,9 @@ class _OptimizeSuffix:
     def add_suffix(
         self, suffix: lale.operators.TrainedOperator
     ) -> lale.operators.TrainedOperator:
-        trained: lale.operators.TrainedOperator
         """Given a trained suffix, adds it to the prefix to give a trained pipeline"""
+        trained: lale.operators.TrainedOperator
+
         if self._prefix is None:
             trained = suffix
         else:
@@ -90,15 +90,20 @@ class _OptimizeSuffix:
 
     def predict(self, X_eval, **predict_params):
         if self._prefix is None:
-            input = X_eval
+            X_input = X_eval
         else:
-            input = self._prefix.transform(X_eval)
-        return self._optimizer.predict(input, **predict_params)
+            X_input = self._prefix.transform(X_eval)
+        return self._optimizer.predict(X_input, **predict_params)
 
     def summary(self, **kwargs):
         return self._optimizer.summary(**kwargs)
 
-    def get_pipeline(self, pipeline_name=None, astype="lale", **kwargs):
+    def get_pipeline(
+        self,
+        pipeline_name: Optional[str] = None,
+        astype: lale.helpers.astype_type = "lale",
+        **kwargs
+    ):
         """Retrieve one of the trials.
 
         Parameters
@@ -113,6 +118,9 @@ class _OptimizeSuffix:
 
         astype : 'lale' or 'sklearn', default 'lale'
             Type of resulting pipeline.
+
+        kwargs :
+            additional arguments to pass to the underlying optimizer
 
         Returns
         -------

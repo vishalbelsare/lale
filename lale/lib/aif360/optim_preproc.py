@@ -14,16 +14,6 @@
 
 import aif360.algorithms.preprocessing
 
-try:
-    import cvxpy  # noqa because the import is only done as a check and flake fails.
-
-    cvxpy_installed = True
-except ImportError:
-    cvxpy_installed = False
-
-if cvxpy_installed:
-    import aif360.algorithms.preprocessing.optim_preproc_helpers.opt_tools
-
 import lale.docstrings
 import lale.operators
 
@@ -34,6 +24,17 @@ from .util import (
     _PandasToDatasetConverter,
     dataset_to_pandas,
 )
+
+try:
+    # because the import is only done as a check and flake fails.
+    import cvxpy  # noqa
+
+    cvxpy_installed = True
+except ImportError:
+    cvxpy_installed = False
+
+if cvxpy_installed:
+    import aif360.algorithms.preprocessing.optim_preproc_helpers.opt_tools  # pylint:disable=ungrouped-imports
 
 
 class _OptimPreprocImpl:
@@ -73,7 +74,6 @@ or with
         self._prot_attr_enc = ProtectedAttributesEncoder(
             **fairness_info,
             remainder="passthrough",
-            return_X_y=True,
         )
         prot_attr_names = [pa["feature"] for pa in protected_attributes]
         self._unprivileged_groups = [{name: 0 for name in prot_attr_names}]
@@ -86,7 +86,7 @@ or with
         self._redacting = Redacting(**fairness_info)
 
     def _encode(self, X, y=None):
-        encoded_X, encoded_y = self._prot_attr_enc.transform(X, y)
+        encoded_X, encoded_y = self._prot_attr_enc.transform_X_y(X, y)
         result = self._pandas_to_dataset.convert(encoded_X, encoded_y)
         return result
 

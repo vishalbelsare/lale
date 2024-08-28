@@ -1,3 +1,4 @@
+---
 name: Tests
 
 on: [push, pull_request]
@@ -9,37 +10,79 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        python-version: [3.6, 3.7, 3.8]
+        python-version: [3.8, 3.9, '3.10', '3.11']
 
     steps:
-    - uses: actions/checkout@v2
+    - uses: actions/checkout@v4
     - name: Set up Python ${{ matrix.python-version }}
-      uses: actions/setup-python@v2
+      uses: actions/setup-python@v5
       with:
         python-version: ${{ matrix.python-version }}
     - name: Cache pip
-      uses: actions/cache@v2
+      uses: actions/cache@v4
       with:
         # This path is specific to Ubuntu
         path: ${{ env.pythonLocation }}
         # Look to see if there is a cache hit for the setup file
-        key: ${{ runner.os }}-pip-new2-${{ env.pythonLocation }}-${{ hashFiles('setup.py') }}
+        key: ${{ runner.os }}-pip-new3-${{ env.pythonLocation }}-${{ hashFiles('setup.py') }}
         restore-keys: |
-          ${{ runner.os }}-pip-new2
-          ${{ runner.os }}-new2
+          ${{ runner.os }}-pip-new3
+          ${{ runner.os }}-new3
     - name: Install numpy
-      run: pip install -U numpy==1.19.2
+      run: pip install -U numpy
     - name: Install dependencies
-      run: pip install --upgrade --upgrade-strategy eager .[full,test]
-    - name: Install deps for test_autoai_ts_libs
-      if: ${{ matrix.python-version == 3.7 || matrix.python-version == 3.8 }}
-      run: pip install --upgrade --upgrade-strategy eager 'autoai-ts-libs'
+      run: pip install --upgrade --upgrade-strategy eager .[full,test,dev]
+    - name: pip list packages
+      run: pip list
+    - name: show pip dependencies
+      run: |
+        pip install pipdeptree
+        pipdeptree -fl
     - name: pre-commit checks
-      uses: pre-commit/action@v2.0.0
-
-  test_matrix:
-    name: Test
+      run: pre-commit run -a
+  docs:
+    name: Documentation build
     runs-on: ubuntu-latest
+    needs: [static]
+    steps:
+    - uses: actions/checkout@v4
+    - name: Set up Python ${{ matrix.python-version }}
+      uses: actions/setup-python@v5
+      with:
+        python-version: 3.8
+    - name: Cache pip
+      uses: actions/cache@v4
+      with:
+        # This path is specific to Ubuntu
+        path: ${{ env.pythonLocation }}
+        # Look to see if there is a cache hit for the setup file
+        key: ${{ runner.os }}-pip-new3-${{ env.pythonLocation }}-${{ hashFiles('setup.py') }}
+        restore-keys: |
+          ${{ runner.os }}-pip-new3
+          ${{ runner.os }}-new3
+    - name: Install doc dependencies
+      run: pip install -r docs/requirements.txt
+    - name: Install lale
+      run: pip install --no-dependencies -e .
+    - name: pip list packages
+      run: pip list
+    - name: Install latex (used for math notation in sphinx)
+      run: >
+        sudo apt-get update -y &&
+        sudo apt-get install -y
+        latexmk texlive-latex-recommended texlive-latex-extra texlive-fonts-recommended
+        dvipng librsvg2-bin
+    - name: Run sphinx
+      run: sphinx-build "." "_build" -W --keep-going
+      working-directory: ./docs
+
+  # test_matrix_pr and test_matrix_master have a lot of redundancy
+  # If GitHub actions adds support for conditional matrix expressions
+  # these should be combined, but current workarounds seem overly complex
+  test_matrix_pr:
+    name: Test (PR)
+    runs-on: ubuntu-latest
+    if: ${{github.event_name == 'pull_request' }}
     needs: [static]
     strategy:
       fail-fast: false
@@ -48,6 +91,97 @@ jobs:
         - test/test_core_classifiers.py
         - test/test_core_regressors.py
         - test/test_core_transformers.py
+        - test/test_core_pipeline.py
+        - test/test_custom_schemas.py
+        - test/test_json_pretty_viz.py
+        - test/test_grammar.py
+        - test/test_type_checking.py
+        - test/test_interoperability.py
+        - test/test_optimizers.py
+        - test/test_pipeline.py
+        - test/test_autogen_lib.py
+        - test/test_snapml.py
+        - test/test_relational.py
+        - test/test_category_encoders.py
+        python-version: [3.9]
+        setup-target: ['.[full,test]']
+        include:
+        - test-case: test/test_core_misc.py
+          python-version: 3.8
+          setup-target: '.[full,test]'
+        - test-case: test/test_core_misc.py
+          python-version: 3.9
+          setup-target: '.[full,test]'
+        - test-case: test/test_core_misc.py
+          python-version: '3.10'
+          setup-target: '.[full,test]'
+        - test-case: test/test_core_misc.py
+          python-version: '3.11'
+          setup-target: '.[full,test]'
+        - test-case: test/test_autogen_lib.py
+          python-version: '3.11'
+          setup-target: '.[test]'
+        - test-case: test/test_halving_gridsearchcv.py
+          python-version: 3.8
+          setup-target: '.[test]'
+        - test-case: test/test_aif360.py
+          python-version: 3.8
+          setup-target: '.[full,test]'
+        - test-case: test/test_relational_sklearn.py
+          python-version: 3.8
+          setup-target: '.[full,test]'
+
+    steps:
+    - uses: actions/checkout@v4
+    - name: Set up Python ${{ matrix.python-version }}
+      uses: actions/setup-python@v5
+      with:
+        python-version: ${{ matrix.python-version }}
+    - name: Install system packages
+      run: sudo apt-get install graphviz swig
+    - name: Cache pip
+      uses: actions/cache@v4
+      with:
+        # This path is specific to Ubuntu
+        path: ${{ env.pythonLocation }}
+        # Look to see if there is a cache hit for the setup file
+        key: ${{ runner.os }}-pip-new3-${{ env.pythonLocation }}-${{ hashFiles('setup.py') }}
+        restore-keys: |
+          ${{ runner.os }}-pip-new3
+          ${{ runner.os }}-new3
+    - name: Install numpy
+      run: pip install -U numpy
+    - name: Install dependencies
+      run: pip install --upgrade --upgrade-strategy eager ${{matrix.setup-target}}
+    - name: Install deps for test_relational_sklearn
+      if: ${{ matrix.test-case == 'test/test_relational_sklearn.py' }}
+      run: pip install 'scikit-learn>=1.0'
+    - name: Install deps for test_snapml
+      if: ${{ matrix.test-case == 'test/test_snapml.py' }}
+      run: pip install 'numpy>=1.20.1,<1.24'
+    - name: Imbalanced learn version for Python 3.8
+      if: ${{ matrix.test-case == 'test/test_interoperability.py' &&  matrix.python-version == 3.8}}
+      run: pip install 'imbalanced-learn==0.9.0' 'scikit-learn==1.0.2'
+    - name: pip list packages
+      run: pip list
+    - name: show pip dependencies
+      run: |
+        pip install pipdeptree
+        pipdeptree -fl
+    - name: Run test
+      run: py.test -v --capture=tee-sys ${{matrix.test-case}}
+
+  test_matrix_master:
+    name: Test (master)
+    runs-on: ubuntu-latest
+    if: ${{ github.event_name == 'push' }}
+    needs: [static]
+    strategy:
+      fail-fast: false
+      matrix:
+        test-case:
+        - test/test_core_classifiers.py
+        - test/test_core_regressors.py
         - test/test_core_misc.py
         - test/test_core_pipeline.py
         - test/test_custom_schemas.py
@@ -57,64 +191,76 @@ jobs:
         - test/test_interoperability.py
         - test/test_optimizers.py
         - test/test_pipeline.py
-        - test/test_autoai_libs.py
-        - test/test_autoai_output_consumption.py
-        - test/test_autogen_lib.py
         - test/test_relational.py
-        - test/test_snapml.py
-        python-version: [3.7, 3.8]
+        - test/test_category_encoders.py
+        python-version: [3.8, 3.9, '3.10', '3.11']
         setup-target: ['.[full,test]']
         include:
-        - test-case: test/test_autoai_ts_libs.py
-          python-version: 3.7
-          setup-target: '.[test]'
+        - test-case: test/test_core_transformers.py
+          python-version: 3.9
+          setup-target: '.[full,test]'
+        - test-case: test/test_core_transformers.py
+          python-version: '3.10'
+          setup-target: '.[full,test]'
+        - test-case: test/test_core_transformers.py
+          python-version: '3.11'
+          setup-target: '.[full,test]'
         - test-case: test/test_autogen_lib.py
-          python-version: 3.6
+          python-version: '3.11'
           setup-target: '.[test]'
         - test-case: test/test_halving_gridsearchcv.py
-          python-version: 3.7
+          python-version: 3.8
           setup-target: '.[test]'
-        - test-case: test/test_lale_lib_versions.py
-          python-version: 3.7
-          setup-target: '.[full,test]'
         - test-case: test/test_aif360.py
-          python-version: 3.7
+          python-version: 3.8
+          setup-target: '.[full,test]'
+        - test-case: test/test_relational_sklearn.py
+          python-version: 3.8
+          setup-target: '.[test]'
+        - test-case: test/test_snapml.py
+          python-version: 3.8
+          setup-target: '.[full,test]'
+        - test-case: test/test_snapml.py
+          python-version: 3.9
           setup-target: '.[full,test]'
 
     steps:
-    - uses: actions/checkout@v2
+    - uses: actions/checkout@v4
     - name: Set up Python ${{ matrix.python-version }}
-      uses: actions/setup-python@v2
+      uses: actions/setup-python@v5
       with:
         python-version: ${{ matrix.python-version }}
     - name: Install system packages
       run: sudo apt-get install graphviz swig
     - name: Cache pip
-      uses: actions/cache@v2
+      uses: actions/cache@v4
       with:
         # This path is specific to Ubuntu
         path: ${{ env.pythonLocation }}
         # Look to see if there is a cache hit for the setup file
-        key: ${{ runner.os }}-pip-new2-${{ env.pythonLocation }}-${{ hashFiles('setup.py') }}
+        key: ${{ runner.os }}-pip-new3-${{ env.pythonLocation }}-${{ hashFiles('setup.py') }}
         restore-keys: |
-          ${{ runner.os }}-pip-new2
-          ${{ runner.os }}-new2
+          ${{ runner.os }}-pip-new3
+          ${{ runner.os }}-new3
     - name: Install numpy
       run: pip install -U numpy
     - name: Install dependencies
       run: pip install --upgrade --upgrade-strategy eager ${{matrix.setup-target}}
-    - name: Install deps for test_autoai_output_consumption
-      if: ${{ matrix.test-case == 'test/test_autoai_output_consumption.py' }}
-      run: pip install 'scikit-learn==0.23.1' 'lightgbm==3.3.0'
-    - name: Install deps for test_lale_lib_versions
-      if: ${{ matrix.test-case == 'test/test_lale_lib_versions.py' }}
-      run: pip install 'scikit-learn==0.20.3' 'xgboost==0.90'
-    - name: Install deps for test_halving_gridsearchcv
-      if: ${{ matrix.test-case == 'test/test_halving_gridsearchcv.py' }}
-      run: pip install 'scikit-learn==0.24.1'
-    - name: Install deps for test_autoai_ts_libs
-      if: ${{ matrix.test-case == 'test/test_autoai_ts_libs.py' }}
-      run: pip install 'autoai-ts-libs' 'scikit-learn==0.23.2'
+    - name: Install deps for test_relational_sklearn
+      if: ${{ matrix.test-case == 'test/test_relational_sklearn.py' }}
+      run: pip install 'scikit-learn>=1.0'
+    - name: Install deps for test_snapml
+      if: ${{ matrix.test-case == 'test/test_snapml.py' }}
+      run: pip install 'numpy>=1.20.1,<1.24'
+    - name: Imbalanced learn version for Python 3.8
+      if: ${{ matrix.test-case == 'test/test_interoperability.py' &&  matrix.python-version == 3.8}}
+      run: pip install 'imbalanced-learn==0.9.0' 'scikit-learn==1.0.2'
+    - name: pip list packages
+      run: pip list
+    - name: show pip dependencies
+      run: |
+        pip install pipdeptree
+        pipdeptree -fl
     - name: Run test
       run: py.test -v --capture=tee-sys ${{matrix.test-case}}
 
@@ -129,26 +275,26 @@ jobs:
         - test/test_core_classifiers.py
         - test/test_core_regressors.py
         - test/test_core_transformers.py
-        python-version: [3.8]
+        python-version: ['3.10', '3.11']
         setup-target: ['.']
     steps:
-    - uses: actions/checkout@v2
+    - uses: actions/checkout@v4
     - name: Set up Python ${{ matrix.python-version }}
-      uses: actions/setup-python@v2
+      uses: actions/setup-python@v5
       with:
         python-version: ${{ matrix.python-version }}
     - name: Install system packages
       run: sudo apt-get install graphviz swig
     - name: Cache pip
-      uses: actions/cache@v2
+      uses: actions/cache@v4
       with:
         # This path is specific to Ubuntu
         path: ${{ env.pythonLocation }}
         # Look to see if there is a cache hit for the setup file
-        key: ${{ runner.os }}-pip-new2-${{ env.pythonLocation }}-${{ hashFiles('setup.py') }}
+        key: ${{ runner.os }}-pip-new3-${{ env.pythonLocation }}-${{ hashFiles('setup.py') }}
         restore-keys: |
-          ${{ runner.os }}-pip-new2
-          ${{ runner.os }}-new2
+          ${{ runner.os }}-pip-new3
+          ${{ runner.os }}-new3
     - name: Install numpy
       run: pip install -U numpy
     - name: Install dependencies
@@ -157,13 +303,21 @@ jobs:
       run: pip install pytest
     - name: Install latest scikit-learn, xgboost, and lightgbm
       run: pip install --upgrade --upgrade-strategy eager scikit-learn xgboost lightgbm
+    - name: pip list packages
+      run: pip list
+    - name: show pip dependencies
+      run: |
+        pip install pipdeptree
+        pipdeptree -fl
     - name: Run test
       run: py.test -v --capture=tee-sys ${{matrix.test-case}}
+      continue-on-error: true  # we may not yet support the latest scikit-learn version
 
-  test_notebooks:
-    name: Test Notebooks
+  test_notebooks_pr:
+    name: Test Notebooks (PR)
     needs: [static]
     runs-on: ubuntu-latest
+    if: ${{ github.event_name == 'pull_request' }}
     env:
       ALL_NOTEBOOK_CATEGORIES: demo_ docs_ talk_
     strategy:
@@ -173,33 +327,141 @@ jobs:
         - demo_
         - docs_
         - talk_
-        python-version: [3.7, 3.8]
+        python-version: [3.9]
         setup-target: ['.[full,test]']
-        test-case: [test/test_notebooks.py]
+        test-case: ['test/test_notebooks.py']
+        dir: ['examples']
+        nbexcludes: ['']
+        include:
+        - dir: 'examples/kdd22'
+          python-version: 3.9
+          setup-target: '.[tutorial,test]'
+          test-case: 'test/test_notebooks.py'
+          # nbexcludes: '06_multobj.ipynb'
+
     steps:
-    - uses: actions/checkout@v2
+    - uses: actions/checkout@v4
     - name: Set up Python ${{ matrix.python-version }}
-      uses: actions/setup-python@v2
+      uses: actions/setup-python@v5
       with:
         python-version: ${{ matrix.python-version }}
     - name: Cache pip
-      uses: actions/cache@v2
+      uses: actions/cache@v4
       with:
         # This path is specific to Ubuntu
         path: ${{ env.pythonLocation }}
         # Look to see if there is a cache hit for the setup file
-        key: ${{ runner.os }}-pip-new2-${{ env.pythonLocation }}-${{ hashFiles('setup.py') }}
+        key: ${{ runner.os }}-pip-new3-${{ env.pythonLocation }}-${{ hashFiles('setup.py') }}
         restore-keys: |
-          ${{ runner.os }}-pip-new2
-          ${{ runner.os }}-new2
+          ${{ runner.os }}-pip-new3
+          ${{ runner.os }}-new3
     - name: Install packages
       run: sudo apt-get install graphviz swig
     - name: Install numpy
       run: pip install -U numpy
     - name: Install dependencies
       run: pip install --upgrade --upgrade-strategy eager ${{matrix.setup-target}}
+    - name: Fix tutorial dependencies
+      if: ${{ matrix.dir == 'examples/kdd22' }}
+      run: |
+        pip install "numpy<2.0.0" "pandas<2.0.0" "xgboost<=1.5.1"
+    - name: pip list packages
+      run: pip list
+    - name: show pip dependencies
+      run: |
+        pip install pipdeptree
+        pipdeptree -fl
     - name: Run test
-      run: NOTEBOOK_CATEGORY=${{matrix.category}} py.test -v --capture=tee-sys ${{matrix.test-case}}
+      run: >
+        NOTEBOOK_EXCLUDES="${{matrix.nbexcludes}}"
+        NOTEBOOK_DIR=${{matrix.dir}}
+        NOTEBOOK_CATEGORY=${{matrix.category}}
+        py.test -v --capture=tee-sys ${{matrix.test-case}}
+
+  test_notebooks_master:
+    name: Test Notebooks (master)
+    needs: [static]
+    runs-on: ubuntu-latest
+    if: ${{ github.event_name == 'push' }}
+    env:
+      ALL_NOTEBOOK_CATEGORIES: demo_ docs_ talk_
+    strategy:
+      fail-fast: false
+      matrix:
+        category:
+        - demo_
+        - docs_
+        - talk_
+        python-version: [3.8, 3.9, '3.10', '3.11']
+        setup-target: ['.[full,test]']
+        test-case: ['test/test_notebooks.py']
+        dir: ['examples']
+        nbexcludes: ['']
+        include:
+        - dir: 'examples'
+          python-version: 3.8
+          setup-target: '.[full,test]'
+          test-case: 'test/test_notebooks.py'
+          nbexcludes: 'demo_auto_pipeline.ipynb'
+        - dir: 'examples/kdd22'
+          python-version: 3.8
+          setup-target: '.[tutorial,test]'
+          test-case: 'test/test_notebooks.py'
+          nbexcludes: '02_total.ipynb'
+        - dir: 'examples/kdd22'
+          python-version: 3.9
+          setup-target: '.[tutorial,test]'
+          test-case: 'test/test_notebooks.py'
+          # nbexcludes: '06_multobj.ipynb'
+        - dir: 'examples/kdd22'
+          python-version: '3.10'
+          setup-target: '.[tutorial,test]'
+          test-case: 'test/test_notebooks.py'
+          # nbexcludes: '06_multobj.ipynb'
+        - dir: 'examples/kdd22'
+          python-version: '3.11'
+          setup-target: '.[tutorial,test]'
+          test-case: 'test/test_notebooks.py'
+          # nbexcludes: '06_multobj.ipynb'
+
+    steps:
+    - uses: actions/checkout@v4
+    - name: Set up Python ${{ matrix.python-version }}
+      uses: actions/setup-python@v5
+      with:
+        python-version: ${{ matrix.python-version }}
+    - name: Cache pip
+      uses: actions/cache@v4
+      with:
+        # This path is specific to Ubuntu
+        path: ${{ env.pythonLocation }}
+        # Look to see if there is a cache hit for the setup file
+        key: ${{ runner.os }}-pip-new3-${{ env.pythonLocation }}-${{ hashFiles('setup.py') }}
+        restore-keys: |
+          ${{ runner.os }}-pip-new3
+          ${{ runner.os }}-new3
+    - name: Install packages
+      run: sudo apt-get install graphviz swig
+    - name: Install numpy
+      run: pip install -U numpy
+    - name: Install dependencies
+      run: pip install --upgrade --upgrade-strategy eager ${{matrix.setup-target}}
+    - name: Fix tutorial dependencies
+      if: ${{ matrix.dir == 'examples/kdd22' }}
+      run: |
+        pip install "numpy<2.0.0" "pandas<2.0.0" "xgboost<=1.5.1"
+    - name: pip list packages
+      run: pip list
+    - name: show pip dependencies
+      run: |
+        pip install pipdeptree
+        pipdeptree -fl
+    - name: Run test
+      run: >
+        NOTEBOOK_EXCLUDES="${{matrix.nbexcludes}}"
+        NOTEBOOK_DIR=${{matrix.dir}}
+        NOTEBOOK_CATEGORY=${{matrix.category}}
+        py.test -v --capture=tee-sys ${{matrix.test-case}}
 
   test_fairness:
     name: Test fairness install
@@ -211,22 +473,26 @@ jobs:
         test-case:
         - test/test_aif360.py
         - test/test_aif360_ensembles.py
-        python-version: [3.7]
+        python-version: [3.8]
         setup-target: ['.[fairness]']
     steps:
-    - uses: actions/checkout@v2
+    - uses: actions/checkout@v4
     - name: Set up Python ${{ matrix.python-version }}
-      uses: actions/setup-python@v2
+      uses: actions/setup-python@v5
       with:
         python-version: ${{ matrix.python-version }}
     - name: Install system packages
       run: sudo apt-get install graphviz swig
-    - name: Install numpy
-      run: pip install -U numpy
     - name: Install pytest
       run: pip install pytest
     - name: Install dependencies
       run: pip install --upgrade --upgrade-strategy eager ${{matrix.setup-target}}
+    - name: pip list packages
+      run: pip list
+    - name: show pip dependencies
+      run: |
+        pip install pipdeptree
+        pipdeptree -fl
     - name: Run test
       run: py.test -v --capture=tee-sys ${{matrix.test-case}}
 
@@ -235,26 +501,22 @@ jobs:
     runs-on: ubuntu-latest
     # This should run only on the master branch of the main repo
     if: github.repository == 'IBM/lale' && github.ref == 'refs/heads/master' && success()
-    needs: [static, test_matrix, test_notebooks]
+    needs: [static, test_matrix_master, test_newer, test_fairness, test_notebooks_master, docs]
     strategy:
       matrix:
-        python-version: [3.7]
+        python-version: [3.8]
     steps:
-    - uses: actions/checkout@v2
+    - uses: actions/checkout@v4
     - name: Set up Python ${{ matrix.python-version }}
-      uses: actions/setup-python@v2
+      uses: actions/setup-python@v5
       with:
         python-version: ${{ matrix.python-version }}
     - name: Install dependencies
-      run: pip install wheel
+      run: pip install wheel twine
     - name: Build distribution
       env:
         # integrate with the current system for timestamping versions
         TRAVIS: " "
       run: python setup.py sdist bdist_wheel
     - name: Publish package to TestPyPI
-      uses: pypa/gh-action-pypi-publish@master
-      with:
-        user: __token__
-        password: ${{ secrets.test_pypi_password }}
-        repository_url: https://test.pypi.org/legacy/
+      run: twine upload -u "__token__" -p "${{ secrets.test_pypi_password }}" -r testpypi dist/*

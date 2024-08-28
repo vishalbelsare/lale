@@ -21,6 +21,7 @@ from sklearn.datasets import load_iris
 
 import lale.lib.lale
 import lale.type_checking
+from lale.helpers import with_fixed_estimator_name
 from lale.lib.lale import NoOp
 from lale.lib.sklearn import (
     PCA,
@@ -86,10 +87,10 @@ def create_function_test_classifier(clf_name):
 
         if isinstance(clf, GradientBoostingClassifier):  # type: ignore
             # because exponential loss does not work with iris dataset as it is not binary classification
-            import lale.schemas as schemas
+            from lale import schemas
 
             clf = clf.customize_schema(
-                loss=schemas.Enum(default="deviance", values=["deviance"])
+                loss=schemas.Enum(default="log_loss", values=["log_loss"])
             )
 
         # test_with_hyperopt
@@ -130,7 +131,7 @@ def create_function_test_classifier(clf_name):
         trained = pipeline.fit(self.X_train, self.y_train)
         _ = trained.predict(self.X_test)
 
-    test_classifier.__name__ = "test_{0}".format(clf.split(".")[-1])
+    test_classifier.__name__ = f"test_{clf_to_test.rsplit('.', maxsplit=1)[-1]}"
     return test_classifier
 
 
@@ -149,6 +150,7 @@ classifiers = [
     "lale.lib.sklearn.LogisticRegression",
     "lale.lib.sklearn.MLPClassifier",
     "lale.lib.sklearn.SVC",
+    "lale.lib.sklearn.Perceptron",
     "lale.lib.sklearn.PassiveAggressiveClassifier",
     "lale.lib.sklearn.MultinomialNB",
     "lale.lib.sklearn.AdaBoostClassifier",
@@ -157,11 +159,11 @@ classifiers = [
     "lale.lib.sklearn.IsolationForest",
     "lale.lib.sklearn.KMeans",
 ]
-for clf in classifiers:
+for clf_to_test in classifiers:
     setattr(
         TestClassification,
-        "test_{0}".format(clf.split(".")[-1]),
-        create_function_test_classifier(clf),
+        f"test_{clf_to_test.rsplit('.', maxsplit=1)[-1]}",
+        create_function_test_classifier(clf_to_test),
     )
 
 
@@ -197,7 +199,6 @@ class TestVotingClassifier(unittest.TestCase):
         data = load_iris()
         X, y = data.data, data.target
         self.X_train, self.X_test, self.y_train, self.y_test = train_test_split(X, y)
-        import warnings
 
         warnings.filterwarnings("ignore")
 
@@ -209,8 +210,6 @@ class TestVotingClassifier(unittest.TestCase):
         trained.predict(self.X_test)
 
     def test_with_lale_pipeline(self):
-        from lale.lib.sklearn import VotingClassifier
-
         clf = VotingClassifier(
             estimators=[
                 ("knn", KNeighborsClassifier()),
@@ -222,7 +221,6 @@ class TestVotingClassifier(unittest.TestCase):
 
     def test_with_hyperopt(self):
         from lale.lib.lale import Hyperopt
-        from lale.lib.sklearn import VotingClassifier
 
         clf = VotingClassifier(
             estimators=[("knn", KNeighborsClassifier()), ("lr", LogisticRegression())]
@@ -233,7 +231,6 @@ class TestVotingClassifier(unittest.TestCase):
         from sklearn.metrics import accuracy_score, make_scorer
 
         from lale.lib.lale import GridSearchCV
-        from lale.lib.sklearn import VotingClassifier
 
         clf = VotingClassifier(
             estimators=[("knn", KNeighborsClassifier()), ("rc", RidgeClassifier())],
@@ -255,7 +252,6 @@ class TestVotingClassifier(unittest.TestCase):
 
         from lale.lib.lale import GridSearchCV
         from lale.lib.lale.observing import LoggingObserver
-        from lale.lib.sklearn import VotingClassifier
 
         clf = VotingClassifier(
             estimators=[("knn", KNeighborsClassifier()), ("rc", RidgeClassifier())],
@@ -281,21 +277,23 @@ class TestBaggingClassifier(unittest.TestCase):
         X, y = data.data, data.target
         self.X_train, self.X_test, self.y_train, self.y_test = train_test_split(X, y)
 
-        import warnings
-
         warnings.filterwarnings("ignore")
 
     def test_with_lale_classifiers(self):
         from lale.lib.sklearn import BaggingClassifier
 
-        clf = BaggingClassifier(base_estimator=LogisticRegression())
+        clf = BaggingClassifier(
+            **with_fixed_estimator_name(estimator=LogisticRegression())
+        )
         trained = clf.fit(self.X_train, self.y_train)
         trained.predict(self.X_test)
 
     def test_with_lale_pipeline(self):
         from lale.lib.sklearn import BaggingClassifier
 
-        clf = BaggingClassifier(base_estimator=PCA() >> LogisticRegression())
+        clf = BaggingClassifier(
+            **with_fixed_estimator_name(estimator=PCA() >> LogisticRegression())
+        )
         trained = clf.fit(self.X_train, self.y_train)
         trained.predict(self.X_test)
 
@@ -303,7 +301,9 @@ class TestBaggingClassifier(unittest.TestCase):
         from lale.lib.lale import Hyperopt
         from lale.lib.sklearn import BaggingClassifier
 
-        clf = BaggingClassifier(base_estimator=LogisticRegression())
+        clf = BaggingClassifier(
+            **with_fixed_estimator_name(estimator=LogisticRegression())
+        )
         trained = clf.auto_configure(self.X_train, self.y_train, Hyperopt, max_evals=1)
         print(trained.to_json())
 
@@ -311,7 +311,9 @@ class TestBaggingClassifier(unittest.TestCase):
         from lale.lib.lale import Hyperopt
         from lale.lib.sklearn import BaggingClassifier
 
-        clf = BaggingClassifier(base_estimator=PCA() >> LogisticRegression())
+        clf = BaggingClassifier(
+            **with_fixed_estimator_name(estimator=PCA() >> LogisticRegression())
+        )
         _ = clf.auto_configure(self.X_train, self.y_train, Hyperopt, max_evals=1)
 
     def test_pipeline_choice_with_hyperopt(self):
@@ -319,14 +321,18 @@ class TestBaggingClassifier(unittest.TestCase):
         from lale.lib.sklearn import BaggingClassifier
 
         clf = BaggingClassifier(
-            base_estimator=PCA() >> (LogisticRegression() | KNeighborsClassifier())
+            **with_fixed_estimator_name(
+                estimator=PCA() >> (LogisticRegression() | KNeighborsClassifier())
+            )
         )
         _ = clf.auto_configure(self.X_train, self.y_train, Hyperopt, max_evals=1)
 
     def test_predict_log_proba(self):
         from lale.lib.sklearn import BaggingClassifier
 
-        clf = BaggingClassifier(base_estimator=PCA() >> LogisticRegression())
+        clf = BaggingClassifier(
+            **with_fixed_estimator_name(estimator=PCA() >> LogisticRegression())
+        )
         trained = clf.fit(self.X_train, self.y_train)
         trained.predict_log_proba(self.X_test)
 
@@ -341,7 +347,9 @@ class TestBaggingClassifier(unittest.TestCase):
     def test_predict_log_proba_trainable(self):
         from lale.lib.sklearn import BaggingClassifier
 
-        clf = BaggingClassifier(base_estimator=PCA() >> LogisticRegression())
+        clf = BaggingClassifier(
+            **with_fixed_estimator_name(estimator=PCA() >> LogisticRegression())
+        )
         with self.assertRaises(ValueError):
             clf.predict_log_proba(self.X_test)
 
@@ -372,7 +380,10 @@ class TestStackingClassifier(unittest.TestCase):
         from lale.lib.lale import Hyperopt
         from lale.lib.sklearn import StackingClassifier
 
-        clf = StackingClassifier(estimators=[("base", LogisticRegression())])
+        clf = StackingClassifier(
+            estimators=[("base", LogisticRegression())],
+            final_estimator=LogisticRegression(),
+        )
         trained = clf.auto_configure(self.X_train, self.y_train, Hyperopt, max_evals=1)
         print(trained.to_json())
 
@@ -380,7 +391,10 @@ class TestStackingClassifier(unittest.TestCase):
         from lale.lib.lale import Hyperopt
         from lale.lib.sklearn import StackingClassifier
 
-        clf = StackingClassifier(estimators=[("base", PCA() >> LogisticRegression())])
+        clf = StackingClassifier(
+            estimators=[("base", PCA() >> LogisticRegression())],
+            final_estimator=LogisticRegression(),
+        )
         _ = clf.auto_configure(self.X_train, self.y_train, Hyperopt, max_evals=1)
 
     def test_pipeline_choice_with_hyperopt(self):
@@ -405,7 +419,7 @@ class TestSpuriousSideConstraintsClassification(unittest.TestCase):
         self.X_train, self.X_test, self.y_train, self.y_test = train_test_split(X, y)
 
     def test_sgd_classifier(self):
-        reg = SGDClassifier(loss="squared_loss", epsilon=0.2)
+        reg = SGDClassifier(loss="squared_error", epsilon=0.2)
         reg.fit(self.X_train, self.y_train)
 
     def test_sgd_classifier_1(self):
@@ -589,7 +603,6 @@ class TestLogisticRegression(unittest.TestCase):
         _ = trained_lr.decision_function(iris.data)
 
     def test_with_sklearn_gridsearchcv(self):
-        from sklearn.datasets import load_iris
         from sklearn.metrics import accuracy_score, make_scorer
         from sklearn.model_selection import GridSearchCV
 
@@ -610,7 +623,7 @@ class TestLogisticRegression(unittest.TestCase):
         from sklearn.model_selection import RandomizedSearchCV
 
         lr = LogisticRegression()
-        ranges, cat_idx = lr.get_param_ranges()
+        ranges, _cat_idx = lr.get_param_ranges()
         # specify parameters and distributions to sample from
         # the loguniform distribution needs to be taken care of properly
         param_dist = {"solver": ranges["solver"], "C": uniform(0.03125, np.log(32768))}
@@ -662,25 +675,24 @@ class TestLogisticRegression(unittest.TestCase):
         X_all, y_all = sklearn.utils.shuffle(iris.data, iris.target, random_state=42)
         X_train, y_train = X_all[10:], y_all[10:]
         X_test, y_test = X_all[:10], y_all[:10]
-        print("expected {}".format(y_test))
-        import warnings
+        print(f"expected {y_test}")
 
         warnings.filterwarnings("ignore", category=FutureWarning)
         trainable = MyLR(solver="lbfgs", C=0.1)
         trained = trainable.fit(X_train, y_train)
         predictions = trained.predict(X_test)
-        print("actual {}".format(predictions))
+        print(f"actual {predictions}")
 
 
 class TestIsolationForest(unittest.TestCase):
     def setUp(self):
-        from sklearn.datasets import load_boston
         from sklearn.model_selection import train_test_split
+
+        from lale.datasets.util import load_boston
 
         data = load_boston()
         X, y = data.data, data.target
         self.X_train, self.X_test, self.y_train, self.y_test = train_test_split(X, y)
-        import warnings
 
         warnings.filterwarnings("ignore")
 
@@ -759,13 +771,13 @@ class TestIsolationForest(unittest.TestCase):
 
 class TestKMeans(unittest.TestCase):
     def setUp(self):
-        from sklearn.datasets import load_boston
         from sklearn.model_selection import train_test_split
+
+        from lale.datasets.util import load_boston
 
         data = load_boston()
         X, y = data.data, data.target
         self.X_train, self.X_test, self.y_train, self.y_test = train_test_split(X, y)
-        import warnings
 
         warnings.filterwarnings("ignore")
 

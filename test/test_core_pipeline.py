@@ -20,11 +20,12 @@ import unittest
 import numpy as np
 import sklearn.datasets
 import sklearn.pipeline
-from sklearn.metrics import accuracy_score
+from sklearn.feature_selection import SelectKBest as SkSelectKBest
+from sklearn.metrics import accuracy_score, r2_score
+from sklearn.model_selection import train_test_split
 
 import lale.datasets.openml
 import lale.helpers
-import lale.operators
 from lale.helpers import import_from_sklearn_pipeline
 from lale.lib.lale import ConcatFeatures, NoOp
 from lale.lib.sklearn import (
@@ -39,16 +40,24 @@ from lale.lib.sklearn import (
     Nystroem,
     OneHotEncoder,
     PassiveAggressiveClassifier,
+    SelectKBest,
     SGDClassifier,
     StandardScaler,
 )
 from lale.lib.xgboost import XGBClassifier
+from lale.operators import (
+    TrainableIndividualOp,
+    TrainablePipeline,
+    TrainedIndividualOp,
+    TrainedPipeline,
+    make_choice,
+    make_pipeline,
+    make_union,
+)
 
 
 class TestCreation(unittest.TestCase):
     def setUp(self):
-        from sklearn.model_selection import train_test_split
-
         data = sklearn.datasets.load_iris()
         X, y = data.data, data.target
         self.X_train, self.X_test, self.y_train, self.y_test = train_test_split(X, y)
@@ -62,32 +71,26 @@ class TestCreation(unittest.TestCase):
         accuracy_score(self.y_test, predictions)
 
     def test_pipeline_create_trainable(self):
-        import lale.lib.sklearn
-        import lale.operators
+        from lale.lib.sklearn import Pipeline as SkPipeline
 
-        pipeline = lale.lib.sklearn.Pipeline(
-            steps=[("pca1", PCA()), ("lr1", LogisticRegression())]
-        )
-        self.assertIsInstance(pipeline, lale.operators.TrainableIndividualOp)
+        pipeline = SkPipeline(steps=[("pca1", PCA()), ("lr1", LogisticRegression())])
+        self.assertIsInstance(pipeline, TrainableIndividualOp)
         trained = pipeline.fit(self.X_train, self.y_train)
         pca_trained, lr_trained = [op for _, op in trained.hyperparams()["steps"]]
-        self.assertIsInstance(pca_trained, lale.operators.TrainedIndividualOp)
-        self.assertIsInstance(lr_trained, lale.operators.TrainedIndividualOp)
+        self.assertIsInstance(pca_trained, TrainedIndividualOp)
+        self.assertIsInstance(lr_trained, TrainedIndividualOp)
         predictions = trained.predict(self.X_test)
         accuracy_score(self.y_test, predictions)
 
     def test_pipeline_create_trained(self):
-        import lale.lib.sklearn
-        import lale.operators
+        from lale.lib.sklearn import Pipeline as SkPipeline
 
         orig_trainable = PCA() >> LogisticRegression()
         orig_trained = orig_trainable.fit(self.X_train, self.y_train)
-        self.assertIsInstance(orig_trained, lale.operators.TrainedPipeline)
-        pca_trained, lr_trained = orig_trained.steps()
-        pre_trained = lale.lib.sklearn.Pipeline(
-            steps=[("pca1", pca_trained), ("lr1", lr_trained)]
-        )
-        self.assertIsInstance(pre_trained, lale.operators.TrainedIndividualOp)
+        self.assertIsInstance(orig_trained, TrainedPipeline)
+        pca_trained, lr_trained = orig_trained.steps_list()
+        pre_trained = SkPipeline(steps=[("pca1", pca_trained), ("lr1", lr_trained)])
+        self.assertIsInstance(pre_trained, TrainedIndividualOp)
         predictions = pre_trained.predict(self.X_test)
         accuracy_score(self.y_test, predictions)
 
@@ -110,7 +113,7 @@ class TestCreation(unittest.TestCase):
     def test_make_pipeline(self):
         tfm = PCA(n_components=10)
         clf = LogisticRegression(random_state=42)
-        trainable = lale.operators.make_pipeline(tfm, clf)
+        trainable = make_pipeline(tfm, clf)
         digits = sklearn.datasets.load_digits()
         trained = trainable.fit(digits.data, digits.target)
         _ = trained.predict(digits.data)
@@ -133,8 +136,6 @@ class TestCreation(unittest.TestCase):
         _ = trained.predict(digits.data)
 
     def test_pca_nys_lr(self):
-        from lale.operators import make_union
-
         nys = Nystroem(n_components=15)
         pca = PCA(n_components=10)
         lr = LogisticRegression(random_state=42)
@@ -144,7 +145,6 @@ class TestCreation(unittest.TestCase):
         _ = trained.predict(digits.data)
 
     def test_compose4(self):
-
         digits = sklearn.datasets.load_digits()
         _ = digits
         ohe = OneHotEncoder(handle_unknown=OneHotEncoder.enum.handle_unknown.ignore)
@@ -174,10 +174,10 @@ class TestCreation(unittest.TestCase):
     def test_compare_with_sklearn(self):
         tfm = PCA()
         clf = LogisticRegression(
-            LogisticRegression.enum.solver.lbfgs,
+            LogisticRegression.enum.solver.saga,
             LogisticRegression.enum.multi_class.auto,
         )
-        trainable = lale.operators.make_pipeline(tfm, clf)
+        trainable = make_pipeline(tfm, clf)
         digits = sklearn.datasets.load_digits()
         trained = trainable.fit(digits.data, digits.target)
         predicted = trained.predict(digits.data)
@@ -185,7 +185,7 @@ class TestCreation(unittest.TestCase):
         from sklearn.linear_model import LogisticRegression as SklearnLR
 
         sklearn_pipeline = sklearn.pipeline.make_pipeline(
-            SklearnPCA(), SklearnLR(solver="lbfgs", multi_class="auto")
+            SklearnPCA(), SklearnLR(solver="saga", multi_class="auto")
         )
         sklearn_pipeline.fit(digits.data, digits.target)
         predicted_sklearn = sklearn_pipeline.predict(digits.data)
@@ -197,8 +197,6 @@ class TestCreation(unittest.TestCase):
 
 class TestImportExport(unittest.TestCase):
     def setUp(self):
-        from sklearn.model_selection import train_test_split
-
         data = sklearn.datasets.load_iris()
         X, y = data.data, data.target
         self.X_train, self.X_test, self.y_train, self.y_test = train_test_split(X, y)
@@ -217,25 +215,26 @@ class TestImportExport(unittest.TestCase):
 
         trained = pipeline2.fit(self.X_train, self.y_train)
         predictions2 = trained.predict(self.X_test)
-        [self.assertEqual(p1, predictions2[i]) for i, p1 in enumerate(predictions1)]
+        for i, p1 in enumerate(predictions1):
+            self.assertEqual(p1, predictions2[i])
 
     def test_import_from_sklearn_pipeline(self):
-        from sklearn.feature_selection import SelectKBest, f_regression
+        from sklearn.feature_selection import f_regression
         from sklearn.pipeline import Pipeline
         from sklearn.svm import SVC as SklearnSVC
 
-        anova_filter = SelectKBest(f_regression, k=3)
+        anova_filter = SkSelectKBest(f_regression, k=3)
         clf = SklearnSVC(kernel="linear")
         sklearn_pipeline = Pipeline([("anova", anova_filter), ("svc", clf)])
         lale_pipeline = typing.cast(
-            lale.operators.TrainablePipeline,
+            TrainablePipeline,
             import_from_sklearn_pipeline(sklearn_pipeline),
         )
         for i, pipeline_step in enumerate(sklearn_pipeline.named_steps):
             sklearn_step_params = sklearn_pipeline.named_steps[
                 pipeline_step
             ].get_params()
-            lale_sklearn_params = self.get_sklearn_params(lale_pipeline.steps()[i])
+            lale_sklearn_params = self.get_sklearn_params(lale_pipeline.steps_list()[i])
             self.assertEqual(sklearn_step_params, lale_sklearn_params)
         self.assert_equal_predictions(sklearn_pipeline, lale_pipeline)
 
@@ -247,14 +246,14 @@ class TestImportExport(unittest.TestCase):
             SklearnPCA(n_components=3), SklearnKNN()
         )
         lale_pipeline = typing.cast(
-            lale.operators.TrainablePipeline,
+            TrainablePipeline,
             import_from_sklearn_pipeline(sklearn_pipeline),
         )
         for i, pipeline_step in enumerate(sklearn_pipeline.named_steps):
             sklearn_step_params = sklearn_pipeline.named_steps[
                 pipeline_step
             ].get_params()
-            lale_sklearn_params = self.get_sklearn_params(lale_pipeline.steps()[i])
+            lale_sklearn_params = self.get_sklearn_params(lale_pipeline.steps_list()[i])
             self.assertEqual(sklearn_step_params, lale_sklearn_params)
         self.assert_equal_predictions(sklearn_pipeline, lale_pipeline)
 
@@ -272,14 +271,10 @@ class TestImportExport(unittest.TestCase):
         )
         sklearn_pipeline = sklearn.pipeline.make_pipeline(union, SklearnKNN())
         lale_pipeline = typing.cast(
-            lale.operators.TrainablePipeline,
+            TrainablePipeline,
             import_from_sklearn_pipeline(sklearn_pipeline),
         )
         self.assertEqual(len(lale_pipeline.edges()), 3)
-        from lale.lib.lale.concat_features import ConcatFeatures
-        from lale.lib.sklearn.k_neighbors_classifier import KNeighborsClassifier
-        from lale.lib.sklearn.nystroem import Nystroem
-        from lale.lib.sklearn.pca import PCA
 
         self.assertIsInstance(lale_pipeline.edges()[0][0], PCA)  # type: ignore
         self.assertIsInstance(lale_pipeline.edges()[0][1], ConcatFeatures)  # type: ignore
@@ -291,7 +286,6 @@ class TestImportExport(unittest.TestCase):
 
     def test_import_from_sklearn_pipeline_nested_pipeline(self):
         from sklearn.decomposition import PCA as SklearnPCA
-        from sklearn.feature_selection import SelectKBest
         from sklearn.kernel_approximation import Nystroem as SklearnNystroem
         from sklearn.neighbors import KNeighborsClassifier as SklearnKNN
         from sklearn.pipeline import FeatureUnion
@@ -301,7 +295,7 @@ class TestImportExport(unittest.TestCase):
                 (
                     "selectkbest_pca",
                     sklearn.pipeline.make_pipeline(
-                        SelectKBest(k=3), SklearnPCA(n_components=1)
+                        SkSelectKBest(k=3), SklearnPCA(n_components=1)
                     ),
                 ),
                 ("nys", SklearnNystroem(n_components=2, random_state=42)),
@@ -309,15 +303,10 @@ class TestImportExport(unittest.TestCase):
         )
         sklearn_pipeline = sklearn.pipeline.make_pipeline(union, SklearnKNN())
         lale_pipeline = typing.cast(
-            lale.operators.TrainablePipeline,
+            TrainablePipeline,
             import_from_sklearn_pipeline(sklearn_pipeline),
         )
         self.assertEqual(len(lale_pipeline.edges()), 4)
-        from lale.lib.lale.concat_features import ConcatFeatures
-        from lale.lib.sklearn.k_neighbors_classifier import KNeighborsClassifier
-        from lale.lib.sklearn.nystroem import Nystroem
-        from lale.lib.sklearn.pca import PCA
-        from lale.lib.sklearn.select_k_best import SelectKBest
 
         # These assertions assume topological sort
         self.assertIsInstance(lale_pipeline.edges()[0][0], SelectKBest)  # type: ignore
@@ -332,7 +321,6 @@ class TestImportExport(unittest.TestCase):
 
     def test_import_from_sklearn_pipeline_nested_pipeline1(self):
         from sklearn.decomposition import PCA as SklearnPCA
-        from sklearn.feature_selection import SelectKBest
         from sklearn.kernel_approximation import Nystroem as SklearnNystroem
         from sklearn.neighbors import KNeighborsClassifier as SklearnKNN
         from sklearn.pipeline import FeatureUnion
@@ -342,14 +330,14 @@ class TestImportExport(unittest.TestCase):
                 (
                     "selectkbest_pca",
                     sklearn.pipeline.make_pipeline(
-                        SelectKBest(k=3),
+                        SkSelectKBest(k=3),
                         FeatureUnion(
                             [
                                 ("pca", SklearnPCA(n_components=1)),
                                 (
                                     "nested_pipeline",
                                     sklearn.pipeline.make_pipeline(
-                                        SelectKBest(k=2), SklearnNystroem()
+                                        SkSelectKBest(k=2), SklearnNystroem()
                                     ),
                                 ),
                             ]
@@ -361,16 +349,11 @@ class TestImportExport(unittest.TestCase):
         )
         sklearn_pipeline = sklearn.pipeline.make_pipeline(union, SklearnKNN())
         lale_pipeline = typing.cast(
-            lale.operators.TrainablePipeline,
+            TrainablePipeline,
             import_from_sklearn_pipeline(sklearn_pipeline),
         )
         self.assertEqual(len(lale_pipeline.edges()), 8)
         # These assertions assume topological sort, which may not be unique. So the assertions are brittle.
-        from lale.lib.lale.concat_features import ConcatFeatures
-        from lale.lib.sklearn.k_neighbors_classifier import KNeighborsClassifier
-        from lale.lib.sklearn.nystroem import Nystroem
-        from lale.lib.sklearn.pca import PCA
-        from lale.lib.sklearn.select_k_best import SelectKBest
 
         self.assertIsInstance(lale_pipeline.edges()[0][0], SelectKBest)  # type: ignore
         self.assertIsInstance(lale_pipeline.edges()[0][1], PCA)  # type: ignore
@@ -392,7 +375,6 @@ class TestImportExport(unittest.TestCase):
 
     def test_import_from_sklearn_pipeline_nested_pipeline2(self):
         from sklearn.decomposition import PCA as SklearnPCA
-        from sklearn.feature_selection import SelectKBest
         from sklearn.kernel_approximation import Nystroem as SklearnNystroem
         from sklearn.neighbors import KNeighborsClassifier as SklearnKNN
         from sklearn.pipeline import FeatureUnion
@@ -402,8 +384,10 @@ class TestImportExport(unittest.TestCase):
                 (
                     "selectkbest_pca",
                     sklearn.pipeline.make_pipeline(
-                        SelectKBest(k=3),
-                        sklearn.pipeline.make_pipeline(SelectKBest(k=2), SklearnPCA()),
+                        SkSelectKBest(k=3),
+                        sklearn.pipeline.make_pipeline(
+                            SkSelectKBest(k=2), SklearnPCA()
+                        ),
                     ),
                 ),
                 ("nys", SklearnNystroem(n_components=2, random_state=42)),
@@ -411,15 +395,10 @@ class TestImportExport(unittest.TestCase):
         )
         sklearn_pipeline = sklearn.pipeline.make_pipeline(union, SklearnKNN())
         lale_pipeline = typing.cast(
-            lale.operators.TrainablePipeline,
+            TrainablePipeline,
             import_from_sklearn_pipeline(sklearn_pipeline),
         )
         self.assertEqual(len(lale_pipeline.edges()), 5)
-        from lale.lib.lale.concat_features import ConcatFeatures
-        from lale.lib.sklearn.k_neighbors_classifier import KNeighborsClassifier
-        from lale.lib.sklearn.nystroem import Nystroem
-        from lale.lib.sklearn.pca import PCA
-        from lale.lib.sklearn.select_k_best import SelectKBest
 
         self.assertIsInstance(lale_pipeline.edges()[0][0], SelectKBest)  # type: ignore
         self.assertIsInstance(lale_pipeline.edges()[0][1], SelectKBest)  # type: ignore
@@ -438,27 +417,45 @@ class TestImportExport(unittest.TestCase):
         from sklearn.ensemble import GradientBoostingClassifier
         from sklearn.pipeline import Pipeline
 
-        from lale.helpers import import_from_sklearn_pipeline
-
         pipe = Pipeline([("noop", None), ("gbc", GradientBoostingClassifier())])
-        with self.assertRaises(ValueError):
-            _ = import_from_sklearn_pipeline(pipe)
+        _ = import_from_sklearn_pipeline(pipe)
 
     def test_import_from_sklearn_pipeline_noop1(self):
         from sklearn.ensemble import GradientBoostingClassifier
         from sklearn.pipeline import Pipeline
-
-        from lale.helpers import import_from_sklearn_pipeline
 
         pipe = Pipeline([("noop", NoOp()), ("gbc", GradientBoostingClassifier())])
         _ = import_from_sklearn_pipeline(pipe)
 
     def test_import_from_sklearn_pipeline_no_wrapper(self):
         from sklearn.neighbors import LocalOutlierFactor
-        from sklearn.pipeline import make_pipeline
+        from sklearn.pipeline import make_pipeline as sk_make_pipeline
 
-        sklearn_pipeline = make_pipeline(PCA(), LocalOutlierFactor())
+        sklearn_pipeline = sk_make_pipeline(PCA(), LocalOutlierFactor())
         _ = import_from_sklearn_pipeline(sklearn_pipeline, fitted=False)
+
+    def test_import_from_sklearn_pipeline_higherorder(self):
+        from sklearn.ensemble import VotingClassifier as VC
+        from sklearn.feature_selection import f_regression
+        from sklearn.pipeline import Pipeline
+        from sklearn.svm import SVC as SklearnSVC
+
+        anova_filter = SkSelectKBest(f_regression, k=3)
+        clf = SklearnSVC(kernel="linear")
+        sklearn_pipeline = Pipeline(
+            [("anova", anova_filter), ("vc_svc", VC(estimators=[("clf", clf)]))]
+        )
+        lale_pipeline = typing.cast(
+            TrainablePipeline,
+            import_from_sklearn_pipeline(sklearn_pipeline),
+        )
+        # for i, pipeline_step in enumerate(sklearn_pipeline.named_steps):
+        #     sklearn_step_params = sklearn_pipeline.named_steps[
+        #         pipeline_step
+        #     ].get_params()
+        #     lale_sklearn_params = self.get_sklearn_params(lale_pipeline.steps_list()[i])
+        #     self.assertEqual(sklearn_step_params, lale_sklearn_params)
+        self.assert_equal_predictions(sklearn_pipeline, lale_pipeline)
 
     def test_export_to_sklearn_pipeline(self):
         lale_pipeline = PCA(n_components=3) >> KNeighborsClassifier()
@@ -469,35 +466,34 @@ class TestImportExport(unittest.TestCase):
                 pipeline_step
             ].get_params()
             lale_sklearn_params = self.get_sklearn_params(
-                trained_lale_pipeline.steps()[i]
+                trained_lale_pipeline.steps_list()[i]
             )
             self.assertEqual(sklearn_step_params, lale_sklearn_params)
         self.assert_equal_predictions(sklearn_pipeline, trained_lale_pipeline)
 
     def test_export_to_sklearn_pipeline1(self):
-        from sklearn.feature_selection import SelectKBest
-
-        lale_pipeline = SelectKBest(k=3) >> KNeighborsClassifier()
+        lale_pipeline = SkSelectKBest(k=3) >> KNeighborsClassifier()
         trained_lale_pipeline = lale_pipeline.fit(self.X_train, self.y_train)
         sklearn_pipeline = trained_lale_pipeline.export_to_sklearn_pipeline()
         for i, pipeline_step in enumerate(sklearn_pipeline.named_steps):
             sklearn_step_params = type(sklearn_pipeline.named_steps[pipeline_step])
             lale_sklearn_params = (
-                type(trained_lale_pipeline.steps()[i]._impl._wrapped_model)
-                if hasattr(trained_lale_pipeline.steps()[i]._impl, "_wrapped_model")
-                else type(trained_lale_pipeline.steps()[i]._impl)
+                type(trained_lale_pipeline.steps_list()[i]._impl._wrapped_model)
+                if hasattr(
+                    trained_lale_pipeline.steps_list()[i]._impl, "_wrapped_model"
+                )
+                else type(trained_lale_pipeline.steps_list()[i]._impl)
             )
             self.assertEqual(sklearn_step_params, lale_sklearn_params)
         self.assert_equal_predictions(sklearn_pipeline, trained_lale_pipeline)
 
     def test_export_to_sklearn_pipeline2(self):
-        from sklearn.feature_selection import SelectKBest
         from sklearn.pipeline import FeatureUnion
 
         lale_pipeline = (
             (
                 (
-                    (PCA(svd_solver="randomized", random_state=42) & SelectKBest(k=3))
+                    (PCA(svd_solver="randomized", random_state=42) & SkSelectKBest(k=3))
                     >> ConcatFeatures()
                 )
                 & Nystroem(random_state=42)
@@ -518,17 +514,16 @@ class TestImportExport(unittest.TestCase):
         self.assert_equal_predictions(sklearn_pipeline, trained_lale_pipeline)
 
     def test_export_to_sklearn_pipeline3(self):
-        from sklearn.feature_selection import SelectKBest
         from sklearn.pipeline import FeatureUnion
 
         lale_pipeline = (
             (
-                (PCA() >> SelectKBest(k=2))
-                & (Nystroem(random_state=42) >> SelectKBest(k=3))
-                & (SelectKBest(k=3))
+                (PCA() >> SkSelectKBest(k=2))
+                & (Nystroem(random_state=42) >> SkSelectKBest(k=3))
+                & (SkSelectKBest(k=3))
             )
             >> ConcatFeatures()
-            >> SelectKBest(k=2)
+            >> SkSelectKBest(k=2)
             >> LogisticRegression()
         )
         trained_lale_pipeline = lale_pipeline.fit(self.X_train, self.y_train)
@@ -536,7 +531,9 @@ class TestImportExport(unittest.TestCase):
         self.assertIsInstance(
             sklearn_pipeline.named_steps["featureunion"], FeatureUnion
         )
-        self.assertIsInstance(sklearn_pipeline.named_steps["selectkbest"], SelectKBest)
+        self.assertIsInstance(
+            sklearn_pipeline.named_steps["selectkbest"], SkSelectKBest
+        )
         from sklearn.linear_model import LogisticRegression as SklearnLR
 
         self.assertIsInstance(
@@ -545,7 +542,7 @@ class TestImportExport(unittest.TestCase):
         self.assert_equal_predictions(sklearn_pipeline, trained_lale_pipeline)
 
     def test_export_to_sklearn_pipeline4(self):
-        lale_pipeline = lale.operators.make_pipeline(LogisticRegression())
+        lale_pipeline = make_pipeline(LogisticRegression())
         trained_lale_pipeline = lale_pipeline.fit(self.X_train, self.y_train)
         sklearn_pipeline = trained_lale_pipeline.export_to_sklearn_pipeline()
         from sklearn.linear_model import LogisticRegression as SklearnLR
@@ -561,36 +558,36 @@ class TestImportExport(unittest.TestCase):
             _ = lale_pipeline.export_to_sklearn_pipeline()
 
     def test_export_to_pickle(self):
-        lale_pipeline = lale.operators.make_pipeline(LogisticRegression())
+        lale_pipeline = make_pipeline(LogisticRegression())
         trained_lale_pipeline = lale_pipeline.fit(self.X_train, self.y_train)
         pickle.dumps(lale_pipeline)
         pickle.dumps(trained_lale_pipeline)
 
     def test_import_from_sklearn_pipeline2(self):
-        from sklearn.feature_selection import SelectKBest, f_regression
+        from sklearn.feature_selection import f_regression
         from sklearn.pipeline import Pipeline
         from sklearn.svm import SVC as SklearnSVC
 
-        anova_filter = SelectKBest(f_regression, k=3)
+        anova_filter = SkSelectKBest(f_regression, k=3)
         clf = SklearnSVC(kernel="linear")
         sklearn_pipeline = Pipeline([("anova", anova_filter), ("svc", clf)])
         sklearn_pipeline.fit(self.X_train, self.y_train)
         lale_pipeline = typing.cast(
-            lale.operators.TrainedPipeline,
+            TrainedPipeline,
             import_from_sklearn_pipeline(sklearn_pipeline),
         )
         lale_pipeline.predict(self.X_test)
 
     def test_import_from_sklearn_pipeline3(self):
-        from sklearn.feature_selection import SelectKBest, f_regression
+        from sklearn.feature_selection import f_regression
         from sklearn.pipeline import Pipeline
         from sklearn.svm import SVC as SklearnSVC
 
-        anova_filter = SelectKBest(f_regression, k=3)
+        anova_filter = SkSelectKBest(f_regression, k=3)
         clf = SklearnSVC(kernel="linear")
         sklearn_pipeline = Pipeline([("anova", anova_filter), ("svc", clf)])
         lale_pipeline = typing.cast(
-            lale.operators.TrainablePipeline,
+            TrainablePipeline,
             import_from_sklearn_pipeline(sklearn_pipeline, fitted=False),
         )
         with self.assertRaises(
@@ -625,8 +622,6 @@ class TestImportExport(unittest.TestCase):
 
 class TestComposition(unittest.TestCase):
     def setUp(self):
-        from sklearn.model_selection import train_test_split
-
         data = sklearn.datasets.load_iris()
         X, y = data.data, data.target
         self.X_train, self.X_test, self.y_train, self.y_test = train_test_split(X, y)
@@ -703,18 +698,32 @@ class TestComposition(unittest.TestCase):
             LogisticRegression.enum.multi_class.auto,
         )
         with self.assertRaises(ValueError):
-            _ = lale.operators.make_pipeline(tfm, tfm, clf)
+            _ = make_pipeline(tfm, tfm, clf)
 
-    def test_increase_num_rows(self):
+    def test_increase_num_rows_predict(self):
         from test.mock_custom_operators import IncreaseRows
 
         increase_rows = IncreaseRows()
         trainable = increase_rows >> LogisticRegression()
         iris = sklearn.datasets.load_iris()
         X, y = iris.data, iris.target
-
         trained = trainable.fit(X, y)
-        _ = trained.predict(X)
+        y_pred = trained.predict(X)
+        self.assertEqual(len(y_pred), len(y) + increase_rows.impl.n_rows)
+
+    def test_increase_num_rows_transform_X_y(self):
+        from test.mock_custom_operators import IncreaseRows
+
+        increase_rows_4 = IncreaseRows(n_rows=4)
+        increase_rows_2 = IncreaseRows(n_rows=2)
+        trainable = increase_rows_4 >> increase_rows_2
+        iris = sklearn.datasets.load_iris()
+        X, y = iris.data, iris.target
+        trained = trainable.fit(X, y)
+        output_X, output_y = trained.transform_X_y(X, y)
+        self.assertEqual(output_X.shape[0], X.shape[0] + 4 + 2)
+        self.assertEqual(output_X.shape[1], X.shape[1])
+        self.assertEqual(output_y.shape[0], y.shape[0] + 4 + 2)
 
     def test_remove_last1(self):
         pipeline = (
@@ -774,26 +783,21 @@ class TestComposition(unittest.TestCase):
 
 class TestAutoPipeline(unittest.TestCase):
     def _fit_predict(self, prediction_type, all_X, all_y, verbose=True):
-        import sklearn.metrics
-        import sklearn.model_selection
-
         if verbose:
-            file_name, line, fn_name, text = traceback.extract_stack()[-2]
+            _file_name, _line, fn_name, _text = traceback.extract_stack()[-2]
             print(f"--- TestAutoPipeline.{fn_name}() ---")
         from lale.lib.lale import AutoPipeline
 
-        train_X, test_X, train_y, test_y = sklearn.model_selection.train_test_split(
-            all_X, all_y
-        )
+        train_X, test_X, train_y, test_y = train_test_split(all_X, all_y)
         trainable = AutoPipeline(
             prediction_type=prediction_type, max_evals=10, verbose=verbose
         )
         trained = trainable.fit(train_X, train_y)
         predicted = trained.predict(test_X)
         if prediction_type == "regression":
-            score = f"r2 score {sklearn.metrics.r2_score(test_y, predicted):.2f}"
+            score = f"r2 score {r2_score(test_y, predicted):.2f}"
         else:
-            score = f"accuracy {sklearn.metrics.accuracy_score(test_y, predicted):.1%}"
+            score = f"accuracy {accuracy_score(test_y, predicted):.1%}"
         if verbose:
             print(score)
             pipe = trained.get_pipeline()
@@ -812,7 +816,9 @@ class TestAutoPipeline(unittest.TestCase):
 
     def test_sklearn_boston(self):
         # regression, categoricals+numbers, no missing values
-        all_X, all_y = sklearn.datasets.load_boston(return_X_y=True)
+        from lale.datasets.util import load_boston
+
+        all_X, all_y = load_boston(return_X_y=True)
         self._fit_predict("regression", all_X, all_y)
 
     def test_sklearn_diabetes(self):
@@ -821,13 +827,11 @@ class TestAutoPipeline(unittest.TestCase):
         self._fit_predict("regression", all_X, all_y)
 
     def test_openml_creditg(self):
-        import sklearn.model_selection
-
         # classification, categoricals+numbers incl. string, no missing values
         (orig_train_X, orig_train_y), _ = lale.datasets.openml.fetch(
             "credit-g", "classification", preprocess=False
         )
-        subsample_X, _, subsample_y, _ = sklearn.model_selection.train_test_split(
+        subsample_X, _, subsample_y, _ = train_test_split(
             orig_train_X, orig_train_y, train_size=0.05
         )
         self._fit_predict("classification", subsample_X, subsample_y)
@@ -836,28 +840,28 @@ class TestAutoPipeline(unittest.TestCase):
         # classification, only numbers, synthetically added missing values
         all_X, all_y = sklearn.datasets.load_iris(return_X_y=True)
         with_missing_X = lale.helpers.add_missing_values(all_X)
-        with self.assertRaisesRegex(ValueError, "Input contains NaN"):
+        with self.assertRaisesRegex(ValueError, "Input.*contains NaN"):
             lr_trainable = LogisticRegression()
             _ = lr_trainable.fit(with_missing_X, all_y)
         self._fit_predict("classification", with_missing_X, all_y)
 
     def test_missing_boston(self):
         # regression, categoricals+numbers, synthetically added missing values
-        all_X, all_y = sklearn.datasets.load_boston(return_X_y=True)
+        from lale.datasets.util import load_boston
+
+        all_X, all_y = load_boston(return_X_y=True)
         with_missing_X = lale.helpers.add_missing_values(all_X)
-        with self.assertRaisesRegex(ValueError, "Input contains NaN"):
+        with self.assertRaisesRegex(ValueError, "Input.*contains NaN"):
             lr_trainable = LinearRegression()
             _ = lr_trainable.fit(with_missing_X, all_y)
         self._fit_predict("regression", with_missing_X, all_y)
 
     def test_missing_creditg(self):
-        import sklearn.model_selection
-
         # classification, categoricals+numbers incl. string, synth. missing
         (orig_train_X, orig_train_y), _ = lale.datasets.openml.fetch(
             "credit-g", "classification", preprocess=False
         )
-        subsample_X, _, subsample_y, _ = sklearn.model_selection.train_test_split(
+        subsample_X, _, subsample_y, _ = train_test_split(
             orig_train_X, orig_train_y, train_size=0.05
         )
         with_missing_X = lale.helpers.add_missing_values(subsample_X)
@@ -867,8 +871,6 @@ class TestAutoPipeline(unittest.TestCase):
 class TestOperatorChoice(unittest.TestCase):
     def test_make_choice_with_instance(self):
         from sklearn.datasets import load_iris
-
-        from lale.operators import make_choice
 
         iris = load_iris()
         X, y = iris.data, iris.target
@@ -891,8 +893,6 @@ class TestOperatorChoice(unittest.TestCase):
 
 class TestScore(unittest.TestCase):
     def setUp(self):
-        from sklearn.model_selection import train_test_split
-
         data = sklearn.datasets.load_iris()
         X, y = data.data, data.target
         self.X_train, self.X_test, self.y_train, self.y_test = train_test_split(X, y)
@@ -902,7 +902,6 @@ class TestScore(unittest.TestCase):
         trained_pipeline = trainable_pipeline.fit(self.X_train, self.y_train)
         score = trained_pipeline.score(self.X_test, self.y_test)
         predictions = trained_pipeline.predict(self.X_test)
-        from sklearn.metrics import accuracy_score
 
         accuracy = accuracy_score(self.y_test, predictions)
         self.assertEqual(accuracy, score)
@@ -912,7 +911,6 @@ class TestScore(unittest.TestCase):
         trainable_pipeline.fit(self.X_train, self.y_train)
         score = trainable_pipeline.score(self.X_test, self.y_test)
         predictions = trainable_pipeline.predict(self.X_test)
-        from sklearn.metrics import accuracy_score
 
         accuracy = accuracy_score(self.y_test, predictions)
         self.assertEqual(accuracy, score)
@@ -925,8 +923,6 @@ class TestScore(unittest.TestCase):
 
 class TestScoreSamples(unittest.TestCase):
     def setUp(self):
-        from sklearn.model_selection import train_test_split
-
         data = sklearn.datasets.load_iris()
         X, y = data.data, data.target
         self.X_train, self.X_test, self.y_train, self.y_test = train_test_split(X, y)
@@ -959,8 +955,6 @@ class TestScoreSamples(unittest.TestCase):
 
 class TestPredictLogProba(unittest.TestCase):
     def setUp(self):
-        from sklearn.model_selection import train_test_split
-
         data = sklearn.datasets.load_iris()
         X, y = data.data, data.target
         self.X_train, self.X_test, self.y_train, self.y_test = train_test_split(X, y)
@@ -999,8 +993,6 @@ class TestPredictLogProba(unittest.TestCase):
 
 class TestPartialFit(unittest.TestCase):
     def setUp(self):
-        from sklearn.model_selection import train_test_split
-
         data = sklearn.datasets.load_iris()
         X, y = data.data, data.target
         self.X_train, self.X_test, self.y_train, self.y_test = train_test_split(X, y)
@@ -1029,6 +1021,11 @@ class TestPartialFit(unittest.TestCase):
         )
         _ = new_trained_pipeline.predict(self.X_test)
 
+    def _last_impl_has(self, op, attr):
+        last = op.get_last()
+        assert last is not None
+        return hasattr(last._impl, attr)
+
     def test_second_call_without_classes(self):
         trainable_pipeline = StandardScaler()
         trained_pipeline = trainable_pipeline.fit(self.X_train, self.y_train)
@@ -1037,7 +1034,7 @@ class TestPartialFit(unittest.TestCase):
             self.X_train, self.y_train, classes=[0, 1, 2]
         )
         # Once SGDClassifier is trained, it has a classes_ attribute.
-        self.assertTrue(hasattr(new_trained_pipeline.get_last()._impl, "classes_"))
+        self.assertTrue(self._last_impl_has(new_trained_pipeline, "classes_"))
         new_trained_pipeline = new_trained_pipeline.partial_fit(
             self.X_test, self.y_test
         )
@@ -1051,7 +1048,7 @@ class TestPartialFit(unittest.TestCase):
             self.X_train, self.y_train, classes=[0, 1, 2]
         )
         # Once SGDClassifier is trained, it has a classes_ attribute.
-        self.assertTrue(hasattr(new_trained_pipeline.get_last()._impl, "classes_"))
+        self.assertTrue(self._last_impl_has(new_trained_pipeline, "classes_"))
         subset_labels = self.y_test[np.where(self.y_test != 0)]
         subset_X = self.X_test[0 : len(subset_labels)]
         new_trained_pipeline = new_trained_pipeline.partial_fit(subset_X, subset_labels)
@@ -1063,8 +1060,70 @@ class TestPartialFit(unittest.TestCase):
         new_pipeline = trained_pipeline.freeze_trained() >> SGDClassifier()
         new_pipeline.partial_fit(self.X_train, self.y_train, classes=[0, 1, 2])
         # Once SGDClassifier is trained, it has a classes_ attribute.
-        self.assertTrue(hasattr(new_pipeline._trained.get_last()._impl, "classes_"))
+        self.assertTrue(self._last_impl_has(new_pipeline._trained, "classes_"))
         subset_labels = self.y_test[np.where(self.y_test != 0)]
         subset_X = self.X_test[0 : len(subset_labels)]
         new_trained_pipeline = new_pipeline.partial_fit(subset_X, subset_labels)
         _ = new_trained_pipeline.predict(self.X_test)
+
+    def test_call_on_trainable(self):
+        trainable_pipeline = StandardScaler()
+        trained_pipeline = trainable_pipeline.fit(self.X_train, self.y_train)
+        new_pipeline = trained_pipeline.freeze_trained() >> SGDClassifier()
+        new_pipeline.partial_fit(self.X_train, self.y_train, classes=[0, 1, 2])
+        new_pipeline.pretty_print()
+        new_trained_pipeline = new_pipeline.partial_fit(
+            self.X_test, self.y_test, classes=[0, 1, 2]
+        )
+        self.assertEqual(new_trained_pipeline, new_pipeline._trained)
+        _ = new_trained_pipeline.predict(self.X_test)
+        new_pipeline.partial_fit(self.X_train, self.y_train, classes=[0, 1, 2])
+
+    def test_call_on_trainable_with_freeze_trained_prefix(self):
+        trainable_pipeline = StandardScaler()
+        trained_pipeline = trainable_pipeline.fit(self.X_train, self.y_train)
+        new_pipeline = trained_pipeline >> SGDClassifier()
+        new_pipeline.partial_fit(self.X_train, self.y_train, classes=[0, 1, 2])
+        new_pipeline.pretty_print()
+        new_trained_pipeline = new_pipeline.partial_fit(
+            self.X_test, self.y_test, classes=[0, 1, 2]
+        )
+        self.assertEqual(new_trained_pipeline, new_pipeline._trained)
+        _ = new_trained_pipeline.predict(self.X_test)
+        new_pipeline.partial_fit(self.X_train, self.y_train, classes=[0, 1, 2])
+
+    def test_call_on_trainable_with_freeze_trained_prefix_false(self):
+        trainable_pipeline = StandardScaler()
+        trained_pipeline = trainable_pipeline.fit(self.X_train, self.y_train)
+        new_pipeline = trained_pipeline >> SGDClassifier()
+        with self.assertRaises(ValueError):
+            new_pipeline.partial_fit(
+                self.X_train,
+                self.y_train,
+                freeze_trained_prefix=False,
+                classes=[0, 1, 2],
+            )
+
+    def test_call_on_trained_with_freeze_trained_prefix(self):
+        trainable_pipeline = StandardScaler() >> SGDClassifier()
+        trained_pipeline = trainable_pipeline.fit(self.X_train, self.y_train)
+        new_pipeline = trained_pipeline
+        new_pipeline.partial_fit(self.X_train, self.y_train, classes=[0, 1, 2])
+        new_pipeline.pretty_print()
+        new_trained_pipeline = new_pipeline.partial_fit(
+            self.X_test, self.y_test, classes=[0, 1, 2]
+        )
+        _ = new_trained_pipeline.predict(self.X_test)
+        new_pipeline.partial_fit(self.X_train, self.y_train, classes=[0, 1, 2])
+
+    def test_call_on_trained_with_freeze_trained_prefix_false(self):
+        trainable_pipeline = StandardScaler() >> SGDClassifier()
+        trained_pipeline = trainable_pipeline.fit(self.X_train, self.y_train)
+        new_pipeline = trained_pipeline
+        with self.assertRaises(ValueError):
+            new_pipeline.partial_fit(
+                self.X_train,
+                self.y_train,
+                freeze_trained_prefix=False,
+                classes=[0, 1, 2],
+            )

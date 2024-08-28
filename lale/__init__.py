@@ -1,4 +1,4 @@
-# Copyright 2019 IBM Corporation
+# Copyright 2019-2023 IBM Corporation
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -14,13 +14,13 @@
 
 import sys
 
-__version__ = "0.5.7"
+__version__ = "0.8.4"
 
 try:
     # This variable is injected in the __builtins__ by the build
     # process. It is used to not try to import rest of the lale packages when
     # it is being installed.
-    __LALE_SETUP__  # type: ignore
+    __LALE_SETUP__  # type: ignore  # pylint:disable=used-before-assignment
 except NameError:
     __LALE_SETUP__ = False
 
@@ -30,4 +30,7 @@ if __LALE_SETUP__:  # type: ignore
     # process.
 else:
     # all other code will go here.
-    from .operator_wrapper import wrap_imported_operators
+    from .operator_wrapper import (
+        register_lale_wrapper_modules as register_lale_wrapper_modules,
+    )
+    from .operator_wrapper import wrap_imported_operators as wrap_imported_operators

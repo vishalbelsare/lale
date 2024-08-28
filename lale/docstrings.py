@@ -1,3 +1,17 @@
+# Copyright 2022 IBM Corporation
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 import inspect
 import pprint
 import re
@@ -101,8 +115,11 @@ def _schema_docstring(name, schema, required=True, relevant=True):
         tags.append("optional")
     if not relevant or schema.get("forOptimizer", True) is False:
         tags.append("not for optimizer")
-    if schema.get("transient", False):
-        tags.append("transient")
+    if "transient" in schema:
+        if schema["transient"] == "alwaysPrint":
+            tags.append("always print")
+        elif schema["transient"] is True:
+            tags.append("transient")
     if "default" in schema:
         tags.append("default " + _value_docstring(schema["default"]))
 
@@ -296,7 +313,13 @@ def __init__(self{args}):
                 import math
 
                 d = {}
-                exec(code, {"nan": math.nan, "inf": math.inf}, d)
+                # this should be safe, since the user controllable
+                # part is created by _paramlist_docstring.
+                # While this can include user (schema) specified defaults,
+                # they would need to be objects (that were already run),
+                # not code that is executed (since that would be invalid in a schema)
+                # so that would not cause user provided code to run here (only to be referenced)
+                exec(code, {"nan": math.nan, "inf": math.inf}, d)  # nosec
                 __init__ = d["__init__"]  # type: ignore
             except BaseException as e:
                 import warnings
@@ -350,6 +373,17 @@ to create an init method with the appropriate parameter list, an exception was r
         "input_fit",
     )
 
+    def partial_fit(self, X, y=None, **fit_params):
+        pass
+
+    make_fun(
+        "partial_fit",
+        partial_fit,
+        "Incremental fit to train train the operator on a batch of samples.",
+        "The partial_fit method is not available until this operator is trainable.",
+        "input_partial_fit",
+    )
+
     def transform(self, X, y=None):
         pass
 
@@ -360,6 +394,18 @@ to create an init method with the appropriate parameter list, an exception was r
         "The transform method is not available until this operator is trained.",
         "input_transform",
         "output_transform",
+    )
+
+    def transform_X_y(self, X, y):
+        pass
+
+    make_fun(
+        "transform_X_y",
+        transform_X_y,
+        "Transform the data and target.",
+        "The transform_X_y method is not available until this operator is trained.",
+        "input_transform_X_y",
+        "output_transform_X_y",
     )
 
     def predict(self, X, **predict_params):
@@ -409,7 +455,6 @@ def set_docstrings(lale_op: "IndividualOp"):
     try:
         if __sphinx_build__:  # type: ignore
             try:
-
                 # impl = lale_op.impl_class
                 frm = inspect.stack()[1]
                 module = inspect.getmodule(frm[0])
@@ -427,7 +472,7 @@ def set_docstrings(lale_op: "IndividualOp"):
                 module.__dict__[name] = new_class
 
                 _set_docstrings_helper(new_class, lale_op, combined_schemas)
-            except NameError as e:
-                raise ValueError(e)
+            except NameError as exc:
+                raise ValueError(exc) from exc
     except NameError:
         pass

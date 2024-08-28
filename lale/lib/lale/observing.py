@@ -1,4 +1,4 @@
-# Copyright 2019 IBM Corporation
+# Copyright 2019-2022 IBM Corporation
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -98,7 +98,8 @@ class _ObservingImpl:
 
     @observe
     def fit(self, X, y=None, **fit_params):
-        return self.getOp().fit(X, y=y, **fit_params)
+        self._hyperparams["op"] = self.getOp().fit(X, y=y, **fit_params)
+        return self
 
 
 _hyperparams_schema = {
@@ -178,14 +179,14 @@ class LoggingObserver:
     def __getattr__(self, prop: str):
         if prop.startswith("_"):
             raise AttributeError
-        elif prop.startswith(start_prefix):
+        if prop.startswith(start_prefix):
             suffix = prop[len(start_prefix) :]
 
             def startfun(*args, **kwargs):
                 if logger.isEnabledFor(logging.INFO):
                     s: str = "  " * self._indent
                     s += f"[observing({suffix})->] "
-                    s += ",".join(map(str, args))
+                    s += ",".join((str(x) for x in args))
                     if len(args) > 0 and len(kwargs) > 0:
                         s += ", "
                     for k, v in kwargs.items():
@@ -203,7 +204,7 @@ class LoggingObserver:
                 if logger.isEnabledFor(logging.INFO):
                     s: str = "  " * self._indent
                     s += f"[<-observed({suffix})] "
-                    s += ",".join(map(str, args))
+                    s += ",".join((str(x) for x in args))
                     for k, v in kwargs.items():
                         s += f"{k}->{v}"
                     logger.info(s)
@@ -218,7 +219,7 @@ class LoggingObserver:
                 if logger.isEnabledFor(logging.INFO):
                     s: str = "  " * self._indent
                     s += f"[!error!<-observed({suffix})] "
-                    s += ",".join(map(str, args))
+                    s += ",".join((str(x) for x in args))
                     for k, v in kwargs.items():
                         s += f"{k}->{v}"
                     logger.info(s)
@@ -226,3 +227,4 @@ class LoggingObserver:
             return failfun
         else:
             logger.debug(f"trying to observe {prop}, which is not a start or stop")
+            return None

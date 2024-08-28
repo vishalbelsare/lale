@@ -1,4 +1,4 @@
-# Copyright 2019, 2020, 2021 IBM Corporation
+# Copyright 2019-2022 IBM Corporation
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -14,23 +14,31 @@
 
 import inspect
 import logging
+from typing import Container, List, Optional, Set
 
-from lale.operators import Operator, clone_op, get_op_from_lale_lib, make_operator
+from lale.operators import Operator, clone_op, get_op_from_lale_lib
 
 logger = logging.getLogger(__name__)
 
 
-def _wrap_operators_in_symtab(symtab):
+def _wrap_operators_in_symtab(
+    symtab,
+    exclude_classes: Optional[Container[str]] = None,
+    wrapper_modules: Optional[List[str]] = None,
+) -> None:
     for name, impl in symtab.items():
         if (
             inspect.isclass(impl)
             and not issubclass(impl, Operator)
             and (hasattr(impl, "predict") or hasattr(impl, "transform"))
         ):
-            operator = get_op_from_lale_lib(impl)
+            if exclude_classes is not None:
+                if name in exclude_classes:
+                    continue
+            operator = get_op_from_lale_lib(impl, wrapper_modules)
             if operator is None:
-                symtab[name] = make_operator(impl=impl, name=name)
-                logger.info(f"Lale:Wrapped unkwnown operator:{name}")
+                # symtab[name] = make_operator(impl=impl, name=name)
+                logger.info(f"Lale:Not wrapping unknown operator:{name}")
             else:
                 symtab[name] = clone_op(operator, name)
                 if operator.class_name().startswith("lale.lib.autogen"):
@@ -39,8 +47,76 @@ def _wrap_operators_in_symtab(symtab):
                     logger.info(f"Lale:Wrapped known operator:{name}")
 
 
-def wrap_imported_operators():
-    calling_frame = inspect.stack()[1][0]
-    _wrap_operators_in_symtab(calling_frame.f_globals)
+def wrap_imported_operators(
+    exclude_classes: Optional[Container[str]] = None,
+    wrapper_modules: Optional[List[str]] = None,
+) -> None:
+    """Wrap the currently imported operators from the symbol table
+    to their lale wrappers.
+
+    Parameters
+    ----------
+    exclude_classes : string, optional, default None
+        List of class names to exclude from wrapping,
+        alias names if they are used while importing.
+
+    wrapper_modules : set of string, optional, default None
+        Set of Lale modules to use for wrapping operators.
+    """
+    current_frame = inspect.currentframe()
+    assert (
+        current_frame is not None
+    ), "Try to use inspect.stack()[1][0] to get the calling frame"
+    calling_frame = current_frame.f_back
+    assert (
+        calling_frame is not None
+    ), "Try to use inspect.stack()[1][0] to get the calling frame"
+    if wrapper_modules is not None:
+        wrapper_modules.extend(get_lale_wrapper_modules())
+    else:
+        wrapper_modules = list(get_lale_wrapper_modules())
+    _wrap_operators_in_symtab(
+        calling_frame.f_globals, exclude_classes, wrapper_modules=wrapper_modules
+    )
     if calling_frame.f_code.co_name == "<module>":  # for testing with exec()
-        _wrap_operators_in_symtab(calling_frame.f_locals)
+        _wrap_operators_in_symtab(
+            calling_frame.f_locals, exclude_classes, wrapper_modules=wrapper_modules
+        )
+
+
+_lale_wrapper_modules: Set[str] = set()
+
+
+def register_lale_wrapper_modules(m: str) -> None:
+    """Register a module with lale's import system
+    so that :meth:`lale.helpers.import_from_sklearn_pipeline` will look for replacement classes in that module.
+
+        Example: (in `__init__.py` file for the module):
+
+    .. code-block:: python
+
+        from lale import register_lale_wrapper_modules
+
+        register_lale_wrapper_modules(__name__)
+
+    Parameters
+    ----------
+    m : [str]
+        The module name
+    """
+    _lale_wrapper_modules.add(m)
+
+
+def get_lale_wrapper_modules() -> Set[str]:
+    return _lale_wrapper_modules
+
+
+for builtin_lale_modules in [
+    "lale.lib.sklearn",
+    "lale.lib.autoai_libs",
+    "lale.lib.xgboost",
+    "lale.lib.lightgbm",
+    "lale.lib.snapml",
+    "autoai_ts_libs.lale",
+]:
+    register_lale_wrapper_modules(builtin_lale_modules)

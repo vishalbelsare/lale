@@ -15,18 +15,8 @@
 import logging
 import typing
 
-import sklearn
-import sklearn.pipeline
-
-try:
-    from sklearn.pipeline import if_delegate_has_method
-except ImportError as e:
-    import sklearn
-
-    if sklearn.__version__ >= "1.0":
-        from sklearn.utils.metaestimators import if_delegate_has_method
-    else:
-        raise e
+from packaging import version
+from sklearn.utils.metaestimators import available_if
 
 import lale.docstrings
 import lale.helpers
@@ -34,6 +24,10 @@ import lale.operators
 from lale.schemas import Bool
 
 logger = logging.getLogger(__name__)
+
+
+def _pipeline_has(attr):
+    return lambda self: (hasattr(self._pipeline, attr))
 
 
 class _PipelineImpl:
@@ -64,17 +58,17 @@ class _PipelineImpl:
         self._final_estimator = self._pipeline.get_last()
         return self
 
-    @if_delegate_has_method(delegate="_final_estimator")
+    @available_if(_pipeline_has("predict"))
     def predict(self, X, **predict_params):
         result = self._pipeline.predict(X, **predict_params)
         return result
 
-    @if_delegate_has_method(delegate="_final_estimator")
+    @available_if(_pipeline_has("predict_proba"))
     def predict_proba(self, X):
         result = self._pipeline.predict_proba(X)
         return result
 
-    @if_delegate_has_method(delegate="_final_estimator")
+    @available_if(_pipeline_has("transform"))
     def transform(self, X, y=None):
         if y is None:
             result = self._pipeline.transform(X)
@@ -213,7 +207,7 @@ _combined_schemas = {
 
 Pipeline = lale.operators.make_operator(_PipelineImpl, _combined_schemas)
 
-if sklearn.__version__ >= "0.21":
+if lale.operators.sklearn_version >= version.Version("0.21"):
     # old: https://scikit-learn.org/0.20/modules/generated/sklearn.pipeline.Pipeline.html
     # new: https://scikit-learn.org/0.21/modules/generated/sklearn.pipeline.Pipeline.html
     Pipeline = typing.cast(

@@ -73,7 +73,7 @@ def _get_cluster2reps(jsn) -> Tuple[Dict[str, str], Dict[str, str]]:
             d_max = depth
             for step_uid, step_jsn in jsn["steps"].items():
                 d_root = max(
-                    [node2depth[p] for p in node2preds[step_uid]], default=depth
+                    (node2depth[p] for p in node2preds[step_uid]), default=depth
                 )
                 d_leaf = populate(step_uid, step_jsn, d_root, more_clusters)
                 d_max = max(d_max, d_leaf)
@@ -125,16 +125,7 @@ def _indiv_op_tooltip(uid, jsn) -> str:
     return tooltip
 
 
-def _url_new_tab(jsn):
-    url = jsn["documentation_url"]
-    # note the missing double-quotes before the url and after the rel:
-    # we are pretending to only provide the URL itself, and abusing
-    # non-grammatical string concatenation to piggy-back more attributes
-    html = f'{url}" target="_blank" rel="noopener noreferrer'
-    return html
-
-
-def _json_to_graphviz_rec(uid, jsn, cluster2reps, is_root, dot_graph_attr):
+def _json_to_graphviz_rec(uid, jsn, cluster2reps, is_root):
     kind = lale.json_operator.json_op_kind(jsn)
     dot: graphviz.Digraph
     if kind in ["Pipeline", "OperatorChoice"] or "steps" in jsn:
@@ -144,7 +135,9 @@ def _json_to_graphviz_rec(uid, jsn, cluster2reps, is_root, dot_graph_attr):
     if is_root:
         dot.attr(
             "graph",
-            {**dot_graph_attr, "rankdir": "LR", "compound": "true", "nodesep": "0.1"},
+            rankdir="LR",
+            compound="true",
+            nodesep="0.1",
         )
         dot.attr("node", fontsize="11", margin="0.06,0.03")
     if kind == "Pipeline":
@@ -182,7 +175,7 @@ def _json_to_graphviz_rec(uid, jsn, cluster2reps, is_root, dot_graph_attr):
                 tooltip=_indiv_op_tooltip(uid, jsn),
             )
             if "documentation_url" in jsn:
-                dot.attr("graph", URL=_url_new_tab(jsn))
+                dot.attr("graph", URL=jsn["documentation_url"], target="_blank")
             nodes = jsn["steps"]
             if jsn["class"] == _LALE_SKL_PIPELINE:
                 names = list(nodes.keys())
@@ -192,7 +185,7 @@ def _json_to_graphviz_rec(uid, jsn, cluster2reps, is_root, dot_graph_attr):
     for step_uid, step_jsn in nodes.items():
         node_kind = lale.json_operator.json_op_kind(step_jsn)
         if node_kind in ["Pipeline", "OperatorChoice"] or "steps" in step_jsn:
-            sub_dot = _json_to_graphviz_rec(step_uid, step_jsn, cluster2reps, False, {})
+            sub_dot = _json_to_graphviz_rec(step_uid, step_jsn, cluster2reps, False)
             dot.subgraph(sub_dot)
         else:
             assert node_kind == "IndividualOp"
@@ -201,9 +194,10 @@ def _json_to_graphviz_rec(uid, jsn, cluster2reps, is_root, dot_graph_attr):
                 "style": "filled",
                 "fillcolor": _STATE2COLOR[step_jsn["state"]],
                 "tooltip": tooltip,
+                "target": "_blank",
             }
             if "documentation_url" in step_jsn:
-                attrs["URL"] = _url_new_tab(step_jsn)
+                attrs["URL"] = step_jsn["documentation_url"]
             label0 = step_jsn.get("viz_label", step_jsn["label"])
             if "\n" in label0:
                 label3 = label0
@@ -234,12 +228,22 @@ def _json_to_graphviz_rec(uid, jsn, cluster2reps, is_root, dot_graph_attr):
     return dot
 
 
-def json_to_graphviz(jsn, ipython_display, dot_graph_attr):
+class _HTML4Jupyter:
+    def __init__(self, html):
+        self.html = html
+
+    def _repr_html_(self):
+        return self.html
+
+
+def json_to_graphviz(jsn, ipython_display):
     cluster2reps = _get_cluster2reps(jsn)
-    dot = _json_to_graphviz_rec("(root)", jsn, cluster2reps, True, dot_graph_attr)
+    dot = _json_to_graphviz_rec("(root)", jsn, cluster2reps, True)
     if ipython_display:
         import IPython.display
 
-        IPython.display.display(dot)
+        svg = dot.pipe(format="svg", encoding="utf-8")
+        for_jupyter = _HTML4Jupyter(svg)
+        IPython.display.display(for_jupyter)
         return None
     return dot

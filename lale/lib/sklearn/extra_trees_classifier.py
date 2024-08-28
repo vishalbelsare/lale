@@ -14,9 +14,11 @@
 
 import sklearn
 import sklearn.ensemble
+from packaging import version
 
 import lale.docstrings
 import lale.operators
+from lale.lib.sklearn._common_schemas import schema_monotonic_cst_classifier
 
 _hyperparams_schema = {
     "description": "An extra-trees classifier.",
@@ -330,7 +332,7 @@ ExtraTreesClassifier = lale.operators.make_operator(
     sklearn.ensemble.ExtraTreesClassifier, _combined_schemas
 )
 
-if sklearn.__version__ >= "0.22":
+if lale.operators.sklearn_version >= version.Version("0.22"):
     # old: https://scikit-learn.org/0.20/modules/generated/sklearn.ensemble.ExtraTreesClassifier.html
     # new: https://scikit-learn.org/0.23/modules/generated/sklearn.ensemble.ExtraTreesClassifier.html
     from lale.schemas import AnyOf, Float, Int, Null
@@ -338,6 +340,7 @@ if sklearn.__version__ >= "0.22":
     ExtraTreesClassifier = ExtraTreesClassifier.customize_schema(
         n_estimators=Int(
             desc="The number of trees in the forest.",
+            minimum=1,
             default=100,
             forOptimizer=True,
             minimumForOptimizer=10,
@@ -368,11 +371,95 @@ if sklearn.__version__ >= "0.22":
         set_as_available=True,
     )
 
-if sklearn.__version__ >= "1.0":
+if lale.operators.sklearn_version >= version.Version("1.0"):
     # old: https://scikit-learn.org/0.24/modules/generated/sklearn.ensemble.ExtraTreesClassifier.html
     # new: https://scikit-learn.org/1.0/modules/generated/sklearn.ensemble.ExtraTreesClassifier.html
     ExtraTreesClassifier = ExtraTreesClassifier.customize_schema(
         min_impurity_split=None, set_as_available=True
+    )
+
+if lale.operators.sklearn_version >= version.Version("1.1"):
+    # old: https://scikit-learn.org/1.0/modules/generated/sklearn.ensemble.ExtraTreesClassifier.html
+    # new: https://scikit-learn.org/1.1/modules/generated/sklearn.ensemble.ExtraTreesClassifier.html
+    ExtraTreesClassifier = ExtraTreesClassifier.customize_schema(
+        max_features={
+            "anyOf": [
+                {
+                    "type": "integer",
+                    "minimum": 2,
+                    "laleMaximum": "X/items/maxItems",  # number of columns
+                    "forOptimizer": False,
+                    "description": "Consider max_features features at each split.",
+                },
+                {
+                    "type": "number",
+                    "minimum": 0.0,
+                    "exclusiveMinimum": True,
+                    "maximum": 1.0,
+                    "distribution": "uniform",
+                    "minimumForOptimizer": 0.01,
+                    "default": 0.5,
+                    "description": "max_features is a fraction and int(max_features * n_features) features are considered at each split.",
+                },
+                {"enum": ["auto", "sqrt", "log2", None]},
+            ],
+            "default": "sqrt",
+            "description": "The number of features to consider when looking for the best split:",
+        },
+        set_as_available=True,
+    )
+
+if lale.operators.sklearn_version >= version.Version("1.3"):
+    ExtraTreesClassifier = ExtraTreesClassifier.customize_schema(
+        max_features={
+            "anyOf": [
+                {
+                    "type": "integer",
+                    "minimum": 2,
+                    "laleMaximum": "X/items/maxItems",  # number of columns
+                    "forOptimizer": False,
+                    "description": "Consider max_features features at each split.",
+                },
+                {
+                    "type": "number",
+                    "minimum": 0.0,
+                    "exclusiveMinimum": True,
+                    "maximum": 1.0,
+                    "distribution": "uniform",
+                    "minimumForOptimizer": 0.01,
+                    "default": 0.5,
+                    "description": "max_features is a fraction and int(max_features * n_features) features are considered at each split.",
+                },
+                {"enum": ["sqrt", "log2", None]},
+            ],
+            "default": None,
+            "description": "The number of features to consider when looking for the best split.",
+        },
+        set_as_available=True,
+    )
+
+if lale.operators.sklearn_version >= version.Version("1.3"):
+    ExtraTreesClassifier = ExtraTreesClassifier.customize_schema(
+        oob_score={
+            "anyOf": [
+                {
+                    "laleType": "callable",
+                    "forOptimizer": False,
+                    "description": "A callable with signature metric(y_true, y_pred).",
+                },
+                {
+                    "type": "boolean",
+                },
+            ],
+            "description": "Whether to use out-of-bag samples to estimate the generalization accuracy.",
+            "default": False,
+        },
+        set_as_available=True,
+    )
+
+if lale.operators.sklearn_version >= version.Version("1.4"):
+    ExtraTreesClassifier = ExtraTreesClassifier.customize_schema(
+        monotonic_cst=schema_monotonic_cst_classifier, set_as_available=True
     )
 
 lale.docstrings.set_docstrings(ExtraTreesClassifier)

@@ -24,19 +24,18 @@ class _TfidfVectorizerImpl:
     def __init__(self, **hyperparams):
         if "dtype" in hyperparams and hyperparams["dtype"] == "float64":
             hyperparams = {**hyperparams, "dtype": np.float64}
-        self._hyperparams = hyperparams
         self._wrapped_model = sklearn.feature_extraction.text.TfidfVectorizer(
-            **self._hyperparams
+            **hyperparams
         )
 
     def fit(self, X, y=None):
-        if isinstance(X, np.ndarray) or isinstance(X, pd.DataFrame):
+        if isinstance(X, (np.ndarray, pd.DataFrame)):
             X = X.squeeze().astype("U")
         self._wrapped_model.fit(X, y)
         return self
 
     def transform(self, X):
-        if isinstance(X, np.ndarray) or isinstance(X, pd.DataFrame):
+        if isinstance(X, (np.ndarray, pd.DataFrame)):
             X = X.squeeze().astype("U")
         return self._wrapped_model.transform(X)
 
@@ -114,7 +113,10 @@ _hyperparams_schema = {
                     "default": "word",
                 },
                 "stop_words": {
-                    "anyOf": [{"enum": [None]}, {"type": "array"}, {"type": "string"}],
+                    "anyOf": [
+                        {"enum": [None, "english"]},
+                        {"type": "array", "items": {"type": "string"}},
+                    ],
                     "default": None,
                 },
                 "token_pattern": {"type": "string", "default": "(?u)\\b\\w\\w+\\b"},
@@ -202,7 +204,11 @@ _hyperparams_schema = {
             "anyOf": [
                 {
                     "type": "object",
-                    "properties": {"stop_words": {"not": {"type": "array"}}},
+                    "properties": {
+                        "stop_words": {
+                            "not": {"type": "array", "items": {"type": "string"}}
+                        }
+                    },
                 },
                 {"type": "object", "properties": {"analyzer": {"enum": ["word"]}}},
             ],

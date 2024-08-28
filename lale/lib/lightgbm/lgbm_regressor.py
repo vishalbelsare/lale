@@ -1,4 +1,4 @@
-# Copyright 2019 IBM Corporation
+# Copyright 2019-2022 IBM Corporation
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -15,6 +15,7 @@
 from typing import TYPE_CHECKING
 
 import lale.docstrings
+import lale.helpers
 import lale.operators
 
 try:
@@ -29,55 +30,13 @@ except ImportError:
 
 
 class _LGBMRegressorImpl:
-    def __init__(
-        self,
-        boosting_type="gbdt",
-        num_leaves=31,
-        max_depth=-1,
-        learning_rate=0.1,
-        n_estimators=100,
-        subsample_for_bin=200000,
-        objective=None,
-        class_weight=None,
-        min_split_gain=0.0,
-        min_child_weight=0.001,
-        min_child_samples=20,
-        subsample=1.0,
-        subsample_freq=0,
-        colsample_bytree=1.0,
-        reg_alpha=0.0,
-        reg_lambda=0.0,
-        random_state=None,
-        n_jobs=-1,
-        silent=True,
-        importance_type="split",
-    ):
+    def __init__(self, **hyperparams):
         assert lightgbm_installed, """Your Python environment does not have lightgbm installed. You can install it with
     pip install lightgbm
 or with
     pip install 'lale[full]'"""
-        self._hyperparams = {
-            "boosting_type": boosting_type,
-            "num_leaves": num_leaves,
-            "max_depth": max_depth,
-            "learning_rate": learning_rate,
-            "n_estimators": n_estimators,
-            "subsample_for_bin": subsample_for_bin,
-            "objective": objective,
-            "class_weight": class_weight,
-            "min_split_gain": min_split_gain,
-            "min_child_weight": min_child_weight,
-            "min_child_samples": min_child_samples,
-            "subsample": subsample,
-            "subsample_freq": subsample_freq,
-            "colsample_bytree": colsample_bytree,
-            "reg_alpha": reg_alpha,
-            "reg_lambda": reg_lambda,
-            "random_state": random_state,
-            "n_jobs": n_jobs,
-            "silent": silent,
-            "importance_type": importance_type,
-        }
+        self._hyperparams = hyperparams
+
         self._wrapped_model = lightgbm.sklearn.LGBMRegressor(**self._hyperparams)
 
     def fit(self, X, y=None, **fit_params):
@@ -87,11 +46,15 @@ or with
             raise RuntimeError(str(self._hyperparams)) from e
         return self
 
+    def partial_fit(self, X, y, **fit_params):
+        fit_params = lale.helpers.dict_without(fit_params, "classes")
+        if self._wrapped_model.__sklearn_is_fitted__():
+            booster = self._wrapped_model.booster_
+            fit_params = {**fit_params, "init_model": booster}
+        return self.fit(X, y, **fit_params)
+
     def predict(self, X, **predict_params):
         return self._wrapped_model.predict(X, **predict_params)
-
-    def predict_proba(self, X):
-        return self._wrapped_model.predict_proba(X)
 
     def score(self, X, y):
         from sklearn.metrics import r2_score
@@ -416,6 +379,7 @@ _input_fit_schema = {
         },
     },
 }
+
 _input_predict_schema = {
     "description": "Return the predicted value for each sample.",
     "type": "object",
@@ -450,53 +414,13 @@ _input_predict_schema = {
         },
     },
 }
+
 _output_predict_schema = {
     "description": "Return the predicted value for each sample.",
     "type": "array",
     "items": {"type": "number"},
 }
-_input_predict_proba_schema = {
-    "description": "Return the predicted probability for each class for each sample.",
-    "type": "object",
-    "properties": {
-        "X": {
-            "type": "array",
-            "items": {
-                "type": "array",
-                "items": {"type": "number"},
-            },
-            "description": " Input features matrix.",
-        },
-        "raw_score": {
-            "type": "boolean",
-            "default": False,
-            "description": "Whether to predict raw scores.",
-        },
-        "num_iteration": {
-            "anyOf": [{"type": "integer"}, {"enum": [None]}],
-            "default": None,
-            "description": "Limit number of iterations in the prediction.",
-        },
-        "pred_leaf": {
-            "type": "boolean",
-            "default": False,
-            "description": "Whether to predict leaf index.",
-        },
-        "pred_contrib": {
-            "type": "boolean",
-            "default": False,
-            "description": "Whether to predict feature contributions.",
-        },
-    },
-}
-_output_predict_proba_schema = {
-    "description": "Return the predicted probability for each class for each sample.",
-    "type": "array",
-    "items": {
-        "type": "array",
-        "items": {"type": "number"},
-    },
-}
+
 _combined_schemas = {
     "$schema": "http://json-schema.org/draft-04/schema#",
     "description": "Combined schema for expected data and hyperparameters.",
@@ -507,25 +431,51 @@ _combined_schemas = {
     "properties": {
         "hyperparams": _hyperparams_schema,
         "input_fit": _input_fit_schema,
+        "input_partial_fit": _input_fit_schema,
         "input_predict": _input_predict_schema,
         "output_predict": _output_predict_schema,
-        "input_predict_proba": _input_predict_proba_schema,
-        "output_predict_proba": _output_predict_proba_schema,
     },
 }
 
 
 LGBMRegressor = lale.operators.make_operator(_LGBMRegressorImpl, _combined_schemas)
 
-if lightgbm_installed and lightgbm.__version__ >= "3.3.0":  #
-    # https://lightgbm.readthedocs.io/en/latest/pythonapi/lightgbm.LGBMRegressor.html
-    LGBMRegressor = LGBMRegressor.customize_schema(
-        silent={
-            "description": "Whether to print messages while running boosting.",
-            "anyOf": [{"enum": ["warn"]}, {"type": "boolean"}],
-            "default": "warn",
-        },
-        set_as_available=True,
-    )
+if lightgbm_installed:
+    from packaging import version
+
+    lightgbm_version = version.parse(getattr(lightgbm, "__version__"))
+
+    if lightgbm_version >= version.Version("3.3.0"):
+        # https://lightgbm.readthedocs.io/en/latest/pythonapi/lightgbm.LGBMRegressor.html
+        LGBMRegressor = LGBMRegressor.customize_schema(
+            silent={
+                "description": "Whether to print messages while running boosting.",
+                "anyOf": [{"enum": ["warn"]}, {"type": "boolean"}],
+                "default": "warn",
+            },
+            set_as_available=True,
+        )
+
+    if lightgbm_version >= version.Version("4.0.0"):
+        # https://lightgbm.readthedocs.io/en/latest/pythonapi/lightgbm.LGBMClassifier.html#lightgbm.LGBMClassifier
+        LGBMRegressor = LGBMRegressor.customize_schema(
+            n_job={
+                "description": """Number of parallel threads to use for training (can be changed at prediction time by passing it as an extra keyword argument).
+For better performance, it is recommended to set this to the number of physical cores in the CPU.
+Negative integers are interpreted as following joblib’s formula (n_cpus + 1 + n_jobs), just like scikit-learn (so e.g. -1 means using all threads). A value of zero corresponds the default number of threads configured for OpenMP in the system. """,
+                "anyOf": [
+                    {
+                        "type": "integer",
+                        "description": "Number of parallel threads.",
+                    },
+                    {
+                        "description": "Use the number of physical cores in the system (its correct detection requires either the joblib or the psutil util libraries to be installed).",
+                        "enum": [None],
+                    },
+                ],
+                "default": None,
+            },
+            set_as_available=True,
+        )
 
 lale.docstrings.set_docstrings(LGBMRegressor)

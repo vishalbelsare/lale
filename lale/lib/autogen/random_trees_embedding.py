@@ -1,8 +1,12 @@
+import typing
+
+import sklearn
 from numpy import inf, nan
+from packaging import version
 from sklearn.ensemble import RandomTreesEmbedding as Op
 
 from lale.docstrings import set_docstrings
-from lale.operators import make_operator
+from lale.operators import PlannedIndividualOp, make_operator, sklearn_version
 
 
 class _RandomTreesEmbeddingImpl:
@@ -149,6 +153,7 @@ _hyperparams_schema = {
         },
     ],
 }
+
 _input_fit_schema = {
     "$schema": "http://json-schema.org/draft-04/schema#",
     "description": "Fit estimator.",
@@ -175,6 +180,7 @@ _input_fit_schema = {
         },
     },
 }
+
 _input_transform_schema = {
     "$schema": "http://json-schema.org/draft-04/schema#",
     "description": "Transform dataset.",
@@ -197,12 +203,14 @@ _input_transform_schema = {
         }
     },
 }
+
 _output_transform_schema = {
     "$schema": "http://json-schema.org/draft-04/schema#",
     "description": "Transformed dataset.",
     "type": "array",
     "items": {"type": "array", "items": {"type": "number"}},
 }
+
 _combined_schemas = {
     "$schema": "http://json-schema.org/draft-04/schema#",
     "description": "Combined schema for expected data and hyperparameters.",
@@ -217,6 +225,17 @@ _combined_schemas = {
         "output_transform": _output_transform_schema,
     },
 }
+
 RandomTreesEmbedding = make_operator(_RandomTreesEmbeddingImpl, _combined_schemas)
+
+if sklearn_version >= version.Version("1.0"):
+    # old: https://scikit-learn.org/0.24/modules/generated/sklearn.ensemble.RandomTreesEmbedding.html
+    # new: https://scikit-learn.org/1.0/modules/generated/sklearn.ensemble.RandomTreesEmbedding.html
+    RandomTreesEmbedding = typing.cast(
+        PlannedIndividualOp,
+        RandomTreesEmbedding.customize_schema(
+            min_impurity_split=None,
+        ),
+    )
 
 set_docstrings(RandomTreesEmbedding)

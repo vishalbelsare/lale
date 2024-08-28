@@ -14,6 +14,7 @@
 
 import sklearn
 import sklearn.preprocessing
+from packaging import version
 
 import lale.docstrings
 import lale.operators
@@ -54,7 +55,7 @@ _hyperparams_schema = {
                             "maximumForOptimizer": 0.999,
                         },
                     ],
-                    "default": [0.25, 0.75],
+                    "default": (0.25, 0.75),
                     "description": "Default: (25.0, 75.0) = (1st quantile, 3rd quantile) = IQR",
                 },
                 "copy": {
@@ -131,7 +132,7 @@ RobustScaler = lale.operators.make_operator(
     sklearn.preprocessing.RobustScaler, _combined_schemas
 )
 
-if sklearn.__version__ >= "0.24":
+if lale.operators.sklearn_version >= version.Version("0.24"):
     # old: https://scikit-learn.org/0.20/modules/generated/sklearn.preprocessing.RobustScaler.html
     # new: https://scikit-learn.org/0.24/modules/generated/sklearn.preprocessing.RobustScaler.html
     from lale.schemas import Bool

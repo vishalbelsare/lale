@@ -11,12 +11,15 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+from packaging import version
+
 try:
     import snapml  # type: ignore
 
-    snapml_installed = True
+    snapml_version = version.parse(getattr(snapml, "__version__"))
+
 except ImportError:
-    snapml_installed = False
+    snapml_version = None
 
 import lale.datasets.data_schemas
 import lale.docstrings
@@ -24,51 +27,18 @@ import lale.operators
 
 
 class _SnapSVMClassifierImpl:
-    def __init__(
-        self,
-        max_iter=1000,
-        regularizer=1.0,
-        device_ids=None,
-        verbose=False,
-        use_gpu=False,
-        class_weight=None,
-        n_jobs=1,
-        tol=0.001,
-        generate_training_history=None,
-        fit_intercept=False,
-        intercept_scaling=1.0,
-        normalize=False,
-        kernel=None,
-        gamma=1.0,
-        n_components=100,
-        random_state=None,
-    ):
-
+    def __init__(self, **hyperparams):
         assert (
-            snapml_installed
+            snapml_version is not None
         ), """Your Python environment does not have snapml installed. Install using: pip install snapml"""
-        self._hyperparams = {
-            "max_iter": max_iter,
-            "regularizer": regularizer,
-            "device_ids": device_ids,
-            "verbose": verbose,
-            "use_gpu": use_gpu,
-            "class_weight": class_weight,
-            "n_jobs": n_jobs,
-            "tol": tol,
-            "generate_training_history": generate_training_history,
-            "fit_intercept": fit_intercept,
-            "intercept_scaling": intercept_scaling,
-            "normalize": normalize,
-            "kernel": kernel,
-            "gamma": gamma,
-            "n_components": n_components,
-            "random_state": random_state,
-        }
-        modified_hps = {**self._hyperparams}
-        if modified_hps["device_ids"] is None:
-            modified_hps["device_ids"] = [0]  # TODO: support list as default
-        self._wrapped_model = snapml.SnapSVMClassifier(**modified_hps)
+
+        if snapml_version <= version.Version("1.8.0") and "loss" in hyperparams:
+            del hyperparams["loss"]
+
+        if hyperparams.get("device_ids", None) is None:
+            hyperparams["device_ids"] = [0]
+
+        self._wrapped_model = snapml.SnapSVMClassifier(**hyperparams)
 
     def fit(self, X, y, **fit_params):
         X = lale.datasets.data_schemas.strip_schema(X)
@@ -328,5 +298,18 @@ _combined_schemas = {
 SnapSVMClassifier = lale.operators.make_operator(
     _SnapSVMClassifierImpl, _combined_schemas
 )
+
+if snapml_version is not None and snapml_version > version.Version("1.8.0"):  # type: ignore # noqa
+    from lale.schemas import Enum
+
+    SnapSVMClassifier = SnapSVMClassifier.customize_schema(
+        loss=Enum(
+            desc="""The loss function that will be used for training.""",
+            values=["hinge", "squared_hinge"],
+            default="hinge",
+            forOptimizer=True,
+        ),
+        set_as_available=True,
+    )
 
 lale.docstrings.set_docstrings(SnapSVMClassifier)

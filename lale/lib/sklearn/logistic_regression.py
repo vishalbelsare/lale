@@ -1,4 +1,4 @@
-# Copyright 2019 IBM Corporation
+# Copyright 2019-2023 IBM Corporation
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -11,14 +11,20 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+
+import logging
 import typing
 
 import sklearn
 import sklearn.linear_model
+from packaging import version
 
 import lale.docstrings
 import lale.operators
 from lale.schemas import AnyOf, Enum, Float, Null
+
+logger = logging.getLogger(__name__)
+
 
 _input_fit_schema = {
     "type": "object",
@@ -185,7 +191,6 @@ preprocess the data with a scaler from sklearn.preprocessing.""",
                 "tol": {
                     "description": "Tolerance for stopping criteria.",
                     "type": "number",
-                    "distribution": "loguniform",
                     "minimum": 0.0,
                     "exclusiveMinimum": True,
                     "default": 0.0001,
@@ -308,10 +313,17 @@ not.""",
                 {
                     "type": "object",
                     "properties": {
-                        "solver": {"not": {"enum": ["newton-cg", "sag", "lbfgs"]}}
+                        "solver": {
+                            "not": {
+                                "enum": ["newton-cg", "newton-cholesky", "sag", "lbfgs"]
+                            }
+                        }
                     },
                 },
-                {"type": "object", "properties": {"penalty": {"enum": ["l2", "none"]}}},
+                {
+                    "type": "object",
+                    "properties": {"penalty": {"enum": ["l2", "none", None]}},
+                },
             ],
         },
         {
@@ -329,7 +341,7 @@ not.""",
             ],
         },
         {
-            "description": "The multi_class multinomial option is unavailable when the solver is liblinear.",
+            "description": "The multi_class multinomial option is unavailable when the solver is liblinear or newton-cholesky.",
             "anyOf": [
                 {
                     "type": "object",
@@ -337,7 +349,9 @@ not.""",
                 },
                 {
                     "type": "object",
-                    "properties": {"solver": {"not": {"enum": ["liblinear"]}}},
+                    "properties": {
+                        "solver": {"not": {"enum": ["liblinear", "newton-cholesky"]}}
+                    },
                 },
             ],
         },
@@ -351,7 +365,7 @@ not.""",
                 },
                 {
                     "type": "object",
-                    "properties": {"penalty": {"not": {"enum": ["none"]}}},
+                    "properties": {"penalty": {"not": {"enum": ["none", None]}}},
                 },
             ],
         },
@@ -416,11 +430,47 @@ _combined_schemas = {
     },
 }
 
+
+class _LogisticRegressionImpl:
+    def __init__(self, **hyperparams):
+        self._wrapped_model = sklearn.linear_model.LogisticRegression(**hyperparams)
+
+    def fit(self, X, y, **fit_params):
+        try:
+            self._wrapped_model.fit(X, y, **fit_params)
+        except AttributeError as e:  # incompatibility old sklearn vs. new scipy
+            import scipy
+
+            message = f'Caught AttributeError("{str(e)}") during LogisticRegression.fit(..) call, scipy version {scipy.__version__}, sklearn version {lale.operators.sklearn_version}, solver {self._wrapped_model.solver}, max_iter {self._wrapped_model.max_iter}. Retrying with solver "saga".'
+            logger.warning(message)
+            old_solver = self._wrapped_model.solver
+            self._wrapped_model.solver = "saga"
+            self._wrapped_model.fit(X, y, **fit_params)
+            self._wrapped_model.solver = old_solver
+        return self
+
+    def predict(self, X):
+        return self._wrapped_model.predict(X)
+
+    def predict_proba(self, X):
+        return self._wrapped_model.predict_proba(X)
+
+    def predict_log_proba(self, X):
+        return self._wrapped_model.predict_log_proba(X)
+
+    def decision_function(self, X):
+        return self._wrapped_model.decision_function(X)
+
+    def score(self, X, y, sample_weight=None):
+        return self._wrapped_model.score(X, y, sample_weight)
+
+
 LogisticRegression = lale.operators.make_operator(
-    sklearn.linear_model.LogisticRegression, _combined_schemas
+    _LogisticRegressionImpl, _combined_schemas
 )
 
-if sklearn.__version__ >= "0.21":
+
+if lale.operators.sklearn_version >= version.Version("0.21"):
     # old: https://scikit-learn.org/0.20/modules/generated/sklearn.linear_model.LogisticRegression.html
     # new: https://scikit-learn.org/0.21/modules/generated/sklearn.linear_model.LogisticRegression.html
     LogisticRegression = typing.cast(
@@ -435,7 +485,7 @@ if sklearn.__version__ >= "0.21":
         ),
     )
 
-if sklearn.__version__ >= "0.22":
+if lale.operators.sklearn_version >= version.Version("0.22"):
     # old: https://scikit-learn.org/0.21/modules/generated/sklearn.linear_model.LogisticRegression.html
     # new: https://scikit-learn.org/0.23/modules/generated/sklearn.linear_model.LogisticRegression.html
     LogisticRegression = typing.cast(
@@ -455,6 +505,60 @@ if sklearn.__version__ >= "0.22":
                 types=[Float(minimum=0.0, maximum=1.0), Null()],
                 desc="The Elastic-Net mixing parameter.",
                 default=None,
+            ),
+            set_as_available=True,
+        ),
+    )
+
+if lale.operators.sklearn_version >= version.Version("1.2"):
+    # old: https://scikit-learn.org/1.1/modules/generated/sklearn.linear_model.LogisticRegression.html
+    # new: https://scikit-learn.org/1.2/modules/generated/sklearn.linear_model.LogisticRegression.html
+    LogisticRegression = typing.cast(
+        lale.operators.PlannedIndividualOp,
+        LogisticRegression.customize_schema(
+            solver=Enum(
+                values=[
+                    "lbfgs",
+                    "liblinear",
+                    "newton-cg",
+                    "newton-cholesky",
+                    "sag",
+                    "saga",
+                ],
+                desc="""Algorithm to use in the optimization problem. Default is ‘lbfgs’. To choose a solver, you might want to consider the following aspects:
+For small datasets, ‘liblinear’ is a good choice, whereas ‘sag’ and ‘saga’ are faster for large ones;
+For multiclass problems, only ‘newton-cg’, ‘sag’, ‘saga’ and ‘lbfgs’ handle multinomial loss;
+‘liblinear’ and is limited to one-versus-rest schemes.
+‘newton-cholesky’ is a good choice for n_samples >> n_features, especially with one-hot encoded categorical features with rare categories. Note that it is limited to binary classification and the one-versus-rest reduction for multiclass classification. Be aware that the memory usage of this solver has a quadratic dependency on n_features because it explicitly computes the Hessian matrix.
+""",
+                default="lbfgs",
+            ),
+            penalty=AnyOf(
+                [
+                    Enum(values=["l1", "l2", "elasticnet", None]),
+                    Enum(
+                        values=["none"],
+                        desc="deprecated.  Use None instead",
+                        forOptimizer=False,
+                    ),
+                ],
+                desc="Norm used in the penalization.",
+                default="l2",
+            ),
+            set_as_available=True,
+        ),
+    )
+
+if lale.operators.sklearn_version >= version.Version("1.4"):
+    # old: https://scikit-learn.org/1.1/modules/generated/sklearn.linear_model.LogisticRegression.html
+    # new: https://scikit-learn.org/1.2/modules/generated/sklearn.linear_model.LogisticRegression.html
+    LogisticRegression = typing.cast(
+        lale.operators.PlannedIndividualOp,
+        LogisticRegression.customize_schema(
+            penalty=Enum(
+                values=["l1", "l2", "elasticnet", None],
+                desc="Norm used in the penalization.",
+                default="l2",
             ),
             set_as_available=True,
         ),

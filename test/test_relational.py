@@ -1,4 +1,4 @@
-# Copyright 2019 IBM Corporation
+# Copyright 2019-2022 IBM Corporation
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -13,31 +13,45 @@
 # limitations under the License.
 
 import unittest
+from typing import List
 
 import jsonschema
 import numpy as np
 import pandas as pd
+from sklearn.datasets import load_iris
+from sklearn.model_selection import train_test_split
+
+import lale.operators
+from lale.lib.rasl.convert import Convert
+from lale.operator_wrapper import wrap_imported_operators
 
 try:
     from pyspark import SparkConf, SparkContext
-    from pyspark.sql import Row, SQLContext
-    from pyspark.sql import functions as f
+    from pyspark.sql import Row, SparkSession, SQLContext
+
+    from lale.datasets.data_schemas import (  # pylint:disable=ungrouped-imports
+        SparkDataFrameWithIndex,
+    )
 
     spark_installed = True
 except ImportError:
     spark_installed = False
 
-from test import EnableSchemaValidation
+from test import EnableSchemaValidation  # pylint:disable=wrong-import-order
 
-from sklearn.datasets import load_iris
-from sklearn.model_selection import train_test_split
-
-from lale import wrap_imported_operators
-from lale.datasets.data_schemas import add_table_name, get_table_name
+from lale.datasets import pandas2spark
+from lale.datasets.data_schemas import (
+    add_table_name,
+    get_index_name,
+    get_table_name,
+    make_optional_schema,
+)
 from lale.datasets.multitable import multitable_train_test_split
 from lale.datasets.multitable.fetch_datasets import fetch_go_sales_dataset
-from lale.expressions import (
+from lale.expressions import (  # pylint:disable=redefined-builtin
     asc,
+    astype,
+    collect_set,
     count,
     day_of_month,
     day_of_week,
@@ -51,34 +65,48 @@ from lale.expressions import (
     isnotnull,
     isnull,
     it,
+    ite,
     max,
     mean,
+    median,
     min,
     minute,
+    mode,
     month,
-    ratio,
     replace,
     string_indexer,
-    subtract,
     sum,
+    variance,
 )
-from lale.helpers import _is_pandas_df, _is_spark_df
-from lale.lib.lale import (
+from lale.helpers import (
+    _ensure_pandas,
+    _is_pandas_df,
+    _is_spark_df,
+    datatype_param_type,
+)
+from lale.lib.dataframe import get_columns
+from lale.lib.lale import ConcatFeatures, Hyperopt, SplitXy
+from lale.lib.rasl import (
     Aggregate,
     Alias,
-    ConcatFeatures,
     Filter,
     GroupBy,
-    Hyperopt,
     Join,
     Map,
     OrderBy,
     Relational,
     Scan,
-    SplitXy,
+    SortIndex,
 )
 from lale.lib.sklearn import PCA, KNeighborsClassifier, LogisticRegression
-from lale.operators import make_pipeline_graph
+
+
+def _set_index_name(df, name):
+    return add_table_name(df.rename_axis(index=name), get_table_name(df))
+
+
+def _set_index(df, name):
+    return add_table_name(df.set_index(name), get_table_name(df))
 
 
 # Testing '==' and '!=' operator with different types of expressions
@@ -103,7 +131,7 @@ class TestExpressions(unittest.TestCase):
 
     def test_expr_5(self):
         X = it.col
-        self.assertTrue(X == X)
+        self.assertTrue(X == X)  # pylint:disable=comparison-with-itself
 
     def test_expr_6(self):
         self.assertFalse(it.col != 5)
@@ -120,143 +148,29 @@ class TestExpressions(unittest.TestCase):
 
     def test_expr_9(self):
         X = it.col
-        self.assertTrue(X != X)
+        self.assertTrue(X != X)  # pylint:disable=comparison-with-itself
 
 
-# Testing filter operator for pandas dataframes
+# Testing filter operator
 class TestFilter(unittest.TestCase):
-    # Define pandas dataframes with different structures
-    def setUp(self):
-        table1 = {
-            "train_id": [1, 2, 3, 4, 5],
-            "col1": ["NY", "TX", "CA", "NY", "CA"],
-            "col2": [0, 1, 1, 0, 1],
-        }
-        self.df1 = add_table_name(pd.DataFrame(data=table1), "main")
+    @classmethod
+    def setUpClass(cls):
+        info = [
+            (1, "NY", 100),
+            (2, "NY", 150),
+            (3, "TX", 200),
+            (4, "TX", 100),
+            (5, "CA", 200),
+        ]
+        t1 = [(2, "Warm"), (3, "Cold"), (4, "Warm"), (5, "Cold")]
+        main = [
+            (1, "NY", 1, float(1)),
+            (2, "TX", 6, np.nan),
+            (3, "CA", 2, float(2)),
+            (4, "NY", 5, None),
+            (5, "CA", 0, float(3)),
+        ]
 
-        table3 = {
-            "tid": [2, 3, 4, 5],
-            "col5": ["Warm", "Cold", "Warm", "Cold"],
-        }
-        self.df3 = add_table_name(pd.DataFrame(data=table3), "t1")
-
-        table5 = {
-            "TrainId": [1, 2, 3, 4, 5],
-            "col3": ["NY", "NY", "CA", "TX", "TX"],
-            "col4": [1, 1, 4, 8, 0],
-            "col6": [1, np.nan, 2, None, 3],
-        }
-        self.df5 = add_table_name(pd.DataFrame(data=table5), "info")
-
-        trainable = Join(
-            pred=[
-                it.main.train_id == it.info.TrainId,
-                it.info.TrainId == it.t1.tid,
-            ],
-            join_type="left",
-        )
-        self.transformed_df = trainable.transform([self.df1, self.df5, self.df3])
-        self.assertEqual(self.transformed_df.shape, (5, 9))
-        self.assertEqual(self.transformed_df["col3"][2], "CA")
-
-    def test_filter_pandas_isnan(self):
-        trainable = Filter(pred=[isnan(it.col6)])
-        filtered_df = trainable.transform(self.transformed_df)
-        self.assertEqual(filtered_df.shape, (2, 9))
-        self.assertTrue(np.all(np.isnan(filtered_df["col6"])))
-
-    def test_filter_pandas_isnotnan(self):
-        trainable = Filter(pred=[isnotnan(it.col6)])
-        filtered_df = trainable.transform(self.transformed_df)
-        self.assertEqual(filtered_df.shape, (3, 9))
-        self.assertTrue(np.any(np.logical_not(np.isnan(filtered_df["col6"]))))
-
-    def test_filter_pandas_isnull(self):
-        trainable = Filter(pred=[isnull(it.col6)])
-        filtered_df = trainable.transform(self.transformed_df)
-        self.assertEqual(filtered_df.shape, (2, 9))
-        self.assertTrue(np.all(np.isnan(filtered_df["col6"])))
-
-    def test_filter_pandas_isnotnull(self):
-        trainable = Filter(pred=[isnotnull(it.col6)])
-        filtered_df = trainable.transform(self.transformed_df)
-        self.assertEqual(filtered_df.shape, (3, 9))
-        self.assertTrue(np.any(np.logical_not(np.isnan(filtered_df["col6"]))))
-
-    def test_filter_pandas_eq(self):
-        trainable = Filter(pred=[it.col3 == "TX"])
-        filtered_df = trainable.transform(self.transformed_df)
-        self.assertEqual(filtered_df.shape, (2, 9))
-        self.assertTrue(np.all(filtered_df["col3"] == "TX"))
-
-    def test_filter_pandas_neq(self):
-        trainable = Filter(pred=[it.col1 != it["col3"]])
-        filtered_df = trainable.transform(self.transformed_df)
-        self.assertEqual(filtered_df.shape, (3, 9))
-        self.assertTrue(np.all(filtered_df["col1"] != filtered_df["col3"]))
-
-    def test_filter_pandas_ge(self):
-        trainable = Filter(pred=[it["col4"] >= 5])
-        filtered_df = trainable.transform(self.transformed_df)
-        self.assertEqual(filtered_df.shape, (1, 9))
-        self.assertTrue(np.all(filtered_df["col4"] >= 5))
-
-    def test_filter_pandas_gt(self):
-        trainable = Filter(pred=[it["train_id"] > it.col4])
-        filtered_df = trainable.transform(self.transformed_df)
-        self.assertEqual(filtered_df.shape, (2, 9))
-        self.assertTrue(np.all(filtered_df["train_id"] != filtered_df["col4"]))
-
-    def test_filter_pandas_le(self):
-        trainable = Filter(pred=[it["col3"] <= "NY"])
-        filtered_df = trainable.transform(self.transformed_df)
-        self.assertEqual(filtered_df.shape, (3, 9))
-        self.assertTrue(np.all(filtered_df["col3"] <= "NY"))
-
-    def test_filter_pandas_lt(self):
-        trainable = Filter(pred=[it["col4"] < it["TrainId"]])
-        filtered_df = trainable.transform(self.transformed_df)
-        self.assertEqual(filtered_df.shape, (2, 9))
-        self.assertTrue(np.all(filtered_df["col4"] < filtered_df["TrainId"]))
-
-    def test_filter_pandas_multiple1(self):
-        trainable = Filter(pred=[it.col3 == "TX", it["col4"] > 4])
-        filtered_df = trainable.transform(self.transformed_df)
-        self.assertEqual(filtered_df.shape, (1, 9))
-        self.assertTrue(np.all(filtered_df["col3"] == "TX"))
-        self.assertTrue(np.all(filtered_df["col4"] > 4))
-
-    def test_filter_pandas_multiple2(self):
-        trainable = Filter(pred=[it.col5 != "Cold", it.train_id <= 4])
-        filtered_df = trainable.transform(self.transformed_df)
-        self.assertEqual(filtered_df.shape, (3, 9))
-        self.assertTrue(np.all(filtered_df["col5"] != "Cold"))
-        self.assertTrue(np.all(filtered_df["train_id"] <= 4))
-
-    def test_filter_pandas_multiple3(self):
-        trainable = Filter(
-            pred=[
-                it["train_id"] == it["TrainId"],
-                it["col2"] != it.col4,
-                it.col5 == "Cold",
-            ]
-        )
-        filtered_df = trainable.transform(self.transformed_df)
-        self.assertEqual(filtered_df.shape, (2, 9))
-        self.assertTrue(np.all(filtered_df["train_id"] == filtered_df["train_id"]))
-        self.assertTrue(np.all(filtered_df["col2"] != filtered_df["col4"]))
-        self.assertTrue(np.all(filtered_df["col5"] == "Cold"))
-
-    def test_filter_pandas_no_col_error(self):
-        with self.assertRaises(ValueError):
-            trainable = Filter(pred=[it["TrainId"] < it.col_na])
-            _ = trainable.transform(self.transformed_df)
-
-
-# Testing filter operator for spark dataframes
-class TestFilterSpark(unittest.TestCase):
-    # Define spark dataframes with different structures
-    def setUp(self):
         if spark_installed:
             conf = (
                 SparkConf()
@@ -266,192 +180,227 @@ class TestFilterSpark(unittest.TestCase):
             sc = SparkContext.getOrCreate(conf=conf)
             sqlContext = SQLContext(sc)
 
-            l2 = [
-                (1, "NY", 100),
-                (2, "NY", 150),
-                (3, "TX", 200),
-                (4, "TX", 100),
-                (5, "CA", 200),
-            ]
-            rdd = sc.parallelize(l2)
-            table2 = rdd.map(
-                lambda x: Row(TrainId=int(x[0]), col3=x[1], col4=int(x[2]))
-            )
-            self.spark_df2 = add_table_name(sqlContext.createDataFrame(table2), "info")
-
-            l3 = [(2, "Warm"), (3, "Cold"), (4, "Warm"), (5, "Cold")]
-            rdd = sc.parallelize(l3)
-            table3 = rdd.map(lambda x: Row(tid=int(x[0]), col5=x[1]))
-            self.spark_df3 = add_table_name(sqlContext.createDataFrame(table3), "t1")
-
-            l4 = [
-                (1, "NY", 1, float(1)),
-                (2, "TX", 6, np.nan),
-                (3, "CA", 2, float(2)),
-                (4, "NY", 5, None),
-                (5, "CA", 0, float(3)),
-            ]
-            rdd = sc.parallelize(l4)
-            table4 = rdd.map(
+            rdd = sc.parallelize(main)
+            table_main = rdd.map(
                 lambda x: Row(TrainId=int(x[0]), col1=x[1], col2=int(x[2]), col6=x[3])
             )
-            self.spark_df4 = add_table_name(sqlContext.createDataFrame(table4), "main")
+            spark_main = add_table_name(sqlContext.createDataFrame(table_main), "main")
+            spark_main = SparkDataFrameWithIndex(spark_main)
+
+            rdd = sc.parallelize(info)
+            table_info = rdd.map(
+                lambda x: Row(train_id=int(x[0]), col3=x[1], col4=int(x[2]))
+            )
+            spark_info = add_table_name(sqlContext.createDataFrame(table_info), "info")
+            spark_info = SparkDataFrameWithIndex(spark_info)
+
+            rdd = sc.parallelize(t1)
+            table_t1 = rdd.map(lambda x: Row(tid=int(x[0]), col5=x[1]))
+            spark_t1 = add_table_name(sqlContext.createDataFrame(table_t1), "t1")
+            spark_t1 = SparkDataFrameWithIndex(spark_t1)
 
             trainable = Join(
-                pred=[it.main.TrainId == it.info.TrainId, it.info.TrainId == it.t1.tid],
+                pred=[
+                    it.main.TrainId == it.info.train_id,
+                    it.info.train_id == it.t1.tid,
+                ],
                 join_type="left",
             )
-            self.transformed_df = trainable.transform(
-                [self.spark_df4, self.spark_df2, self.spark_df3]
+            spark_transformed_df = trainable.transform(
+                [spark_main, spark_info, spark_t1]
+            )
+            spark_transformed_df = SparkDataFrameWithIndex(
+                spark_transformed_df.drop_indexes().sort("TrainId")
+            )
+            cls.tgt2datasets = {
+                "pandas": spark_transformed_df.toPandas(),
+                "spark": spark_transformed_df,
+            }
+        else:
+            pandas_main = pd.DataFrame(main, index=["TrainId", "col1", "col2", "col6"])
+            pandas_info = pd.DataFrame(info, index=["train_id", "col3", "col4"])
+            pandas_t1 = pd.DataFrame(t1, index=["tid", "col5"])
+            trainable = Join(
+                pred=[
+                    it.main.TrainId == it.info.train_id,
+                    it.info.train_id == it.t1.tid,
+                ],
+                join_type="left",
+            )
+            pandas_transformed_df = trainable.transform(
+                [pandas_main, pandas_info, pandas_t1]
             ).sort("TrainId")
-            self.assertEqual(self.transformed_df.count(), 5)
-            self.assertEqual(len(self.transformed_df.columns), 8)
-            self.assertEqual(self.transformed_df.collect()[2]["col1"], "CA")
+            cls.tgt2datasets = {"pandas": pandas_transformed_df}
 
-    def test_filter_spark_isnan(self):
-        if spark_installed:
-            trainable = Filter(pred=[isnan(it["col6"])])
-            filtered_df = trainable.transform(self.transformed_df)
-            self.assertEqual(filtered_df.count(), 1)
-            self.assertEqual(len(filtered_df.columns), 8)
-            rows = filtered_df.rdd.collect()
-            row0 = rows[0]
-            self.assertEqual(row0[1], "TX")
-            self.assertTrue(np.isnan(row0[3]))
+    def test_filter_isnan(self):
+        pandas_transformed_df = self.tgt2datasets["pandas"]
+        self.assertEqual(pandas_transformed_df.shape, (5, 9))
+        self.assertEqual(pandas_transformed_df["col1"][2], "CA")
+        for tgt, transformed_df in self.tgt2datasets.items():
+            trainable = Filter(pred=[isnan(it.col6)])
+            filtered_df = trainable.transform(transformed_df)
+            if tgt == "pandas":
+                # `None` is considered as `nan` in Pandas
+                self.assertEqual(filtered_df.shape, (2, 9), tgt)
+                self.assertTrue(all(np.isnan(filtered_df["col6"])), tgt)
+            elif tgt == "spark":
+                self.assertEqual(_ensure_pandas(filtered_df).shape, (1, 9), tgt)
+                test_list = [row[0] for row in filtered_df.select("col6").collect()]
+                self.assertTrue(all((np.isnan(i) for i in test_list if i is not None)))
+                self.assertEqual(
+                    get_index_name(transformed_df), get_index_name(filtered_df)
+                )
+            else:
+                assert False
 
-    def test_filter_spark_isnotnan(self):
-        if spark_installed:
-            trainable = Filter(pred=[isnotnan(it["col6"])])
-            filtered_df = trainable.transform(self.transformed_df)
-            self.assertEqual(filtered_df.count(), 4)
-            self.assertEqual(len(filtered_df.columns), 8)
-            test_list = filtered_df.select(f.collect_list("col6")).first()[0]
-            self.assertTrue(np.all((not np.isnan(i) for i in test_list)))
+    def test_filter_isnotnan(self):
+        for tgt, transformed_df in self.tgt2datasets.items():
+            trainable = Filter(pred=[isnotnan(it.col6)])
+            filtered_df = trainable.transform(transformed_df)
+            if tgt == "pandas":
+                self.assertTrue(all(np.logical_not(np.isnan(filtered_df["col6"]))), tgt)
+                self.assertEqual(filtered_df.shape, (3, 9), tgt)
+            elif tgt == "spark":
+                self.assertEqual(_ensure_pandas(filtered_df).shape, (4, 9), tgt)
+                test_list = [row[0] for row in filtered_df.select("col6").collect()]
+                self.assertTrue(
+                    all((not np.isnan(i) for i in test_list if i is not None))
+                )
+                self.assertEqual(
+                    get_index_name(transformed_df), get_index_name(filtered_df)
+                )
+            else:
+                assert False
 
-    def test_filter_spark_isnull(self):
-        if spark_installed:
-            trainable = Filter(pred=[isnull(it["col6"])])
-            filtered_df = trainable.transform(self.transformed_df)
-            self.assertEqual(filtered_df.count(), 1)
-            self.assertEqual(len(filtered_df.columns), 8)
-            rows = filtered_df.rdd.collect()
-            row0 = rows[0]
-            self.assertEqual(row0[1], "NY")
-            self.assertIsNone(row0[3])
+    def test_filter_isnull(self):
+        for tgt, transformed_df in self.tgt2datasets.items():
+            trainable = Filter(pred=[isnull(it.col6)])
+            filtered_df = trainable.transform(transformed_df)
+            if tgt == "pandas":
+                # `None` is considered as `nan` in Pandas
+                self.assertEqual(filtered_df.shape, (2, 9), tgt)
+                self.assertTrue(all(np.isnan(filtered_df["col6"])), tgt)
+            elif tgt == "spark":
+                self.assertEqual(_ensure_pandas(filtered_df).shape, (1, 9), tgt)
+                test_list = [row[0] for row in filtered_df.select("col6").collect()]
+                self.assertTrue(all((i is None for i in test_list)))
+                self.assertEqual(
+                    get_index_name(transformed_df), get_index_name(filtered_df)
+                )
+            else:
+                assert False
 
-    def test_filter_spark_isnotnull(self):
-        if spark_installed:
-            trainable = Filter(pred=[isnotnull(it["col6"])])
-            filtered_df = trainable.transform(self.transformed_df)
-            self.assertEqual(filtered_df.count(), 4)
-            self.assertEqual(len(filtered_df.columns), 8)
-            test_list = filtered_df.select(f.collect_list("col6")).first()[0]
-            self.assertTrue(np.all(i is not None for i in test_list))
+    def test_filter_isnotnull(self):
+        for tgt, transformed_df in self.tgt2datasets.items():
+            trainable = Filter(pred=[isnotnull(it.col6)])
+            filtered_df = trainable.transform(transformed_df)
+            if tgt == "pandas":
+                # `None` is considered as `nan` in Pandas
+                self.assertEqual(filtered_df.shape, (3, 9), tgt)
+                self.assertTrue(all(np.logical_not(np.isnan(filtered_df["col6"]))))
+            elif tgt == "spark":
+                self.assertEqual(_ensure_pandas(filtered_df).shape, (4, 9), tgt)
+                test_list = [row[0] for row in filtered_df.select("col6").collect()]
+                self.assertTrue(all((i is not None for i in test_list)))
+                self.assertEqual(
+                    get_index_name(transformed_df), get_index_name(filtered_df)
+                )
+            else:
+                assert False
 
-    def test_filter_spark_eq(self):
-        if spark_installed:
-            trainable = Filter(pred=[it["col3"] == "NY"])
-            filtered_df = trainable.transform(self.transformed_df)
-            self.assertEqual(filtered_df.count(), 2)
-            self.assertEqual(len(filtered_df.columns), 8)
-            test_list = filtered_df.select(f.collect_list("col3")).first()[0]
-            self.assertTrue(np.all(pd.Series(test_list) == "NY"))
+    def test_filter_eq(self):
+        for tgt, transformed_df in self.tgt2datasets.items():
+            trainable = Filter(pred=[it.col3 == "TX"])
+            filtered_df = trainable.transform(transformed_df)
+            filtered_df = _ensure_pandas(filtered_df)
+            self.assertEqual(filtered_df.shape, (2, 9), tgt)
+            self.assertTrue(all(filtered_df["col3"] == "TX"), tgt)
 
-    def test_filter_spark_neq(self):
-        if spark_installed:
+    def test_filter_neq(self):
+        for tgt, transformed_df in self.tgt2datasets.items():
             trainable = Filter(pred=[it.col1 != it["col3"]])
-            filtered_df = trainable.transform(self.transformed_df)
-            self.assertEqual(filtered_df.count(), 3)
-            self.assertEqual(len(filtered_df.columns), 8)
-            test_list = filtered_df.select(f.collect_list("col1")).first()[0]
-            test_list1 = filtered_df.select(f.collect_list("col3")).first()[0]
-            self.assertTrue(np.all(pd.Series(test_list) != pd.Series(test_list1)))
+            filtered_df = trainable.transform(transformed_df)
+            filtered_df = _ensure_pandas(filtered_df)
+            self.assertEqual(filtered_df.shape, (3, 9), tgt)
+            self.assertTrue(all(filtered_df["col1"] != filtered_df["col3"]), tgt)
 
-    def test_filter_spark_ge(self):
-        if spark_installed:
+    def test_filter_ge(self):
+        for tgt, transformed_df in self.tgt2datasets.items():
             trainable = Filter(pred=[it["col4"] >= 150])
-            filtered_df = trainable.transform(self.transformed_df)
-            self.assertEqual(filtered_df.count(), 3)
-            self.assertEqual(len(filtered_df.columns), 8)
-            test_list = filtered_df.select(f.collect_list("col4")).first()[0]
-            self.assertTrue(np.all(pd.Series(test_list) >= 150))
+            filtered_df = trainable.transform(transformed_df)
+            filtered_df = _ensure_pandas(filtered_df)
+            self.assertEqual(filtered_df.shape, (3, 9), tgt)
+            self.assertTrue(all(filtered_df["col4"] >= 150), tgt)
 
-    def test_filter_spark_gt(self):
-        if spark_installed:
-            trainable = Filter(pred=[it["col2"] > it.tid])
-            filtered_df = trainable.transform(self.transformed_df)
-            self.assertEqual(filtered_df.count(), 2)
-            self.assertEqual(len(filtered_df.columns), 8)
-            test_list = filtered_df.select(f.collect_list("col2")).first()[0]
-            test_list1 = filtered_df.select(f.collect_list("tid")).first()[0]
-            self.assertTrue(np.all(pd.Series(test_list) > pd.Series(test_list1)))
+    def test_filter_gt(self):
+        for tgt, transformed_df in self.tgt2datasets.items():
+            trainable = Filter(pred=[it["col4"] > 150])
+            filtered_df = trainable.transform(transformed_df)
+            filtered_df = _ensure_pandas(filtered_df)
+            self.assertEqual(filtered_df.shape, (2, 9), tgt)
+            self.assertTrue(all(filtered_df["col4"] > 150), tgt)
 
-    def test_filter_spark_le(self):
-        if spark_installed:
-            trainable = Filter(pred=[it.col3 <= "NY"])
-            filtered_df = trainable.transform(self.transformed_df)
-            self.assertEqual(filtered_df.count(), 3)
-            self.assertEqual(len(filtered_df.columns), 8)
-            test_list = filtered_df.select(f.collect_list("col3")).first()[0]
-            self.assertTrue(np.all(pd.Series(test_list) <= "NY"))
+    def test_filter_le(self):
+        for tgt, transformed_df in self.tgt2datasets.items():
+            trainable = Filter(pred=[it["col3"] <= "NY"])
+            filtered_df = trainable.transform(transformed_df)
+            filtered_df = _ensure_pandas(filtered_df)
+            self.assertEqual(filtered_df.shape, (3, 9), tgt)
+            self.assertTrue(all(filtered_df["col3"] <= "NY"), tgt)
 
-    def test_filter_spark_lt(self):
-        if spark_installed:
-            trainable = Filter(pred=[it.col2 < it.TrainId])
-            filtered_df = trainable.transform(self.transformed_df)
-            self.assertEqual(filtered_df.count(), 2)
-            self.assertEqual(len(filtered_df.columns), 8)
-            test_list = filtered_df.select(f.collect_list("col2")).first()[0]
-            test_list1 = filtered_df.select(f.collect_list("TrainId")).first()[0]
-            self.assertTrue(np.all(pd.Series(test_list) < pd.Series(test_list1)))
+    def test_filter_lt(self):
+        for tgt, transformed_df in self.tgt2datasets.items():
+            trainable = Filter(pred=[it["col2"] < it["TrainId"]])
+            filtered_df = trainable.transform(transformed_df)
+            filtered_df = _ensure_pandas(filtered_df)
+            self.assertEqual(filtered_df.shape, (2, 9), tgt)
+            self.assertTrue(all(filtered_df["col2"] < filtered_df["TrainId"]), tgt)
 
-    def test_filter_spark_multiple1(self):
-        if spark_installed:
-            trainable = Filter(pred=[it["col3"] == "TX", it.col4 >= 150])
-            filtered_df = trainable.transform(self.transformed_df)
-            self.assertEqual(filtered_df.count(), 1)
-            self.assertEqual(len(filtered_df.columns), 8)
-            test_list = filtered_df.select(f.collect_list("col3")).first()[0]
-            self.assertTrue(np.all(pd.Series(test_list) == "TX"))
-            test_list = filtered_df.select(f.collect_list("col4")).first()[0]
-            self.assertTrue(np.all(pd.Series(test_list) >= 150))
+    def test_filter_multiple1(self):
+        for tgt, transformed_df in self.tgt2datasets.items():
+            trainable = Filter(pred=[it.col3 == "TX", it["col2"] > 4])
+            filtered_df = trainable.transform(transformed_df)
+            filtered_df = _ensure_pandas(filtered_df)
+            self.assertEqual(filtered_df.shape, (1, 9))
+            self.assertTrue(all(filtered_df["col3"] == "TX"), tgt)
+            self.assertTrue(all(filtered_df["col2"] > 4), tgt)
 
-    def test_filter_spark_multiple2(self):
-        if spark_installed:
-            trainable = Filter(pred=[it["col5"] != "Cold", it["TrainId"] <= 4])
-            filtered_df = trainable.transform(self.transformed_df)
-            self.assertEqual(filtered_df.count(), 2)
-            self.assertEqual(len(filtered_df.columns), 8)
-            test_list = filtered_df.select(f.collect_list("col5")).first()[0]
-            self.assertTrue(np.all(pd.Series(test_list) != "Cold"))
-            test_list = filtered_df.select(f.collect_list("TrainId")).first()[0]
-            self.assertTrue(np.all(pd.Series(test_list) <= 4))
+    def test_filter_multiple2(self):
+        for tgt, transformed_df in self.tgt2datasets.items():
+            trainable = Filter(pred=[it.col5 != "Cold", it.train_id < 4])
+            filtered_df = trainable.transform(transformed_df)
+            if tgt == "pandas":
+                self.assertEqual(filtered_df.shape, (2, 9))
+            elif tgt == "spark":
+                # `None != "Cold"` is not true in Spark
+                filtered_df = _ensure_pandas(filtered_df)
+                self.assertEqual(filtered_df.shape, (1, 9))
+            else:
+                assert False
+            self.assertTrue(all(filtered_df["col5"] != "Cold"), tgt)
+            self.assertTrue(all(filtered_df["train_id"] < 4), tgt)
 
-    def test_filter_spark_multiple3(self):
-        if spark_installed:
+    def test_multiple3(self):
+        for tgt, transformed_df in self.tgt2datasets.items():
             trainable = Filter(
                 pred=[
                     it["tid"] == it["TrainId"],
-                    it.col2 > it.tid,
-                    it["col5"] == "Warm",
+                    it["col2"] >= it.train_id,
+                    it.col3 == "NY",
                 ]
             )
-            filtered_df = trainable.transform(self.transformed_df)
-            self.assertEqual(filtered_df.count(), 2)
-            self.assertEqual(len(filtered_df.columns), 8)
-            test_list = filtered_df.select(f.collect_list("tid")).first()[0]
-            test_list1 = filtered_df.select(f.collect_list("TrainId")).first()[0]
-            self.assertTrue(np.all(pd.Series(test_list) == pd.Series(test_list1)))
-            test_list = filtered_df.select(f.collect_list("col2")).first()[0]
-            test_list1 = filtered_df.select(f.collect_list("tid")).first()[0]
-            self.assertTrue(np.all(pd.Series(test_list) > pd.Series(test_list1)))
-            test_list = filtered_df.select(f.collect_list("col5")).first()[0]
-            self.assertTrue(np.all(pd.Series(test_list) == "Warm"))
+            filtered_df = trainable.transform(transformed_df)
+            filtered_df = _ensure_pandas(filtered_df)
+            self.assertEqual(filtered_df.shape, (1, 9), tgt)
+            self.assertTrue(all(filtered_df["tid"] == filtered_df["TrainId"]), tgt)
+            self.assertTrue(all(filtered_df["col2"] >= filtered_df["train_id"]), tgt)
+            self.assertTrue(all(filtered_df["col3"] == "NY"), tgt)
 
-    def test_filter_spark_no_col_error(self):
-        with self.assertRaises(ValueError):
-            trainable = Filter(pred=[it["TrainId"] < it.col_na])
-            _ = trainable.transform(self.transformed_df)
+    def test_filter_no_col_error(self):
+        for _tgt, transformed_df in self.tgt2datasets.items():
+            with self.assertRaises(ValueError):
+                trainable = Filter(pred=[it["TrainId"] < it.col_na])
+                _ = trainable.transform(transformed_df)
 
 
 class TestScan(unittest.TestCase):
@@ -485,34 +434,31 @@ class TestScan(unittest.TestCase):
 
     def test_error3(self):
         with self.assertRaisesRegex(ValueError, "expected `it.table_name` or"):
-            _ = Scan(table=(it.go_products == 42))
+            _ = Scan(table=it.go_products == 42)
 
 
 # Testing alias operator for pandas and spark dataframes
 class TestAlias(unittest.TestCase):
-    # Get go_sales dataset in pandas and spark dataframes
-    def setUp(self):
-        self.go_sales = fetch_go_sales_dataset()
-        self.go_sales_spark = fetch_go_sales_dataset("spark")
+    @classmethod
+    def setUpClass(cls):
+        targets: List[datatype_param_type] = ["pandas", "spark"]
+        cls.tgt2datasets = {tgt: fetch_go_sales_dataset(tgt) for tgt in targets}
 
-    def test_alias_pandas(self):
-        trainable = Alias(name="test_alias")
-        go_products = self.go_sales[3]
-        self.assertEqual(get_table_name(go_products), "go_products")
-        transformed_df = trainable.transform(go_products)
-        self.assertEqual(get_table_name(transformed_df), "test_alias")
-        self.assertTrue(_is_pandas_df(transformed_df))
-        self.assertEqual(transformed_df.shape, (274, 8))
-
-    def test_alias_spark(self):
-        trainable = Alias(name="test_alias")
-        go_products = self.go_sales_spark[3]
-        self.assertEqual(get_table_name(go_products), "go_products")
-        transformed_df = trainable.transform(go_products)
-        self.assertEqual(get_table_name(transformed_df), "test_alias")
-        self.assertTrue(_is_spark_df(transformed_df))
-        self.assertEqual(transformed_df.count(), 274)
-        self.assertEqual(len(transformed_df.columns), 8)
+    def test_alias(self):
+        for tgt, datasets in self.tgt2datasets.items():
+            trainable = Alias(name="test_alias")
+            go_products = datasets[3]
+            self.assertEqual(get_table_name(go_products), "go_products")
+            transformed_df = trainable.transform(go_products)
+            self.assertEqual(get_table_name(transformed_df), "test_alias")
+            if tgt == "pandas":
+                self.assertTrue(_is_pandas_df(transformed_df))
+            elif tgt == "spark":
+                self.assertTrue(_is_spark_df(transformed_df))
+                transformed_df = transformed_df.toPandas()
+            else:
+                assert False
+            self.assertEqual(transformed_df.shape, (274, 8))
 
     def test_alias_name_error(self):
         with self.assertRaises(jsonschema.ValidationError):
@@ -523,249 +469,321 @@ class TestAlias(unittest.TestCase):
             _ = Alias(name="    ")
 
     def test_filter_name(self):
-        go_products = self.go_sales[3]
-        trained = Filter(pred=[it["Unit cost"] >= 10])
-        transformed = trained.transform(go_products)
-        self.assertEqual(get_table_name(transformed), "go_products")
+        for tgt, datasets in self.tgt2datasets.items():
+            go_products = datasets[3]
+            trained = Filter(pred=[it["Unit cost"] >= 10])
+            transformed = trained.transform(go_products)
+            self.assertEqual(get_table_name(transformed), "go_products", tgt)
+            if tgt == "spark":
+                self.assertEqual(get_index_name(transformed), "index", tgt)
 
     def test_map_name(self):
-        go_products = self.go_sales[3]
-        trained = Map(columns={"unit_cost": it["Unit cost"]})
-        transformed = trained.transform(go_products)
-        self.assertEqual(get_table_name(transformed), "go_products")
+        for tgt, datasets in self.tgt2datasets.items():
+            go_products = datasets[3]
+            trained = Map(columns={"unit_cost": it["Unit cost"]})
+            transformed = trained.transform(go_products)
+            self.assertEqual(get_table_name(transformed), "go_products", tgt)
+            if tgt == "spark":
+                self.assertEqual(get_index_name(transformed), "index", tgt)
 
     def test_join_name(self):
-        trained = Join(
-            pred=[it.go_1k["Retailer code"] == it.go_retailers["Retailer code"]],
-            name="joined_tables",
-        )
-        transformed = trained.transform(self.go_sales)
-        self.assertEqual(get_table_name(transformed), "joined_tables")
+        for tgt, datasets in self.tgt2datasets.items():
+            trained = Join(
+                pred=[it.go_1k["Retailer code"] == it.go_retailers["Retailer code"]],
+                name="joined_tables",
+            )
+            transformed = trained.transform(datasets)
+            self.assertEqual(get_table_name(transformed), "joined_tables", tgt)
 
     def test_groupby_name(self):
-        go_products = self.go_sales[3]
-        trained = GroupBy(by=[it["Product line"]])
-        transformed = trained.transform(go_products)
-        self.assertEqual(get_table_name(transformed), "go_products")
+        for tgt, datasets in self.tgt2datasets.items():
+            go_products = datasets[3]
+            trained = GroupBy(by=[it["Product line"]])
+            transformed = trained.transform(go_products)
+            self.assertEqual(get_table_name(transformed), "go_products", tgt)
 
     def test_aggregate_name(self):
-        go_daily_sales = self.go_sales[1]
-        group_by = GroupBy(by=[it["Retailer code"]])
-        aggregate = Aggregate(columns={"min_quantity": min(it.Quantity)})
-        trained = group_by >> aggregate
-        transformed = trained.transform(go_daily_sales)
-        self.assertEqual(get_table_name(transformed), "go_daily_sales")
+        for tgt, datasets in self.tgt2datasets.items():
+            go_daily_sales = datasets[1]
+            group_by = GroupBy(by=[it["Retailer code"]])
+            aggregate = Aggregate(columns={"min_quantity": min(it.Quantity)})
+            trained = group_by >> aggregate
+            transformed = trained.transform(go_daily_sales)
+            self.assertEqual(get_table_name(transformed), "go_daily_sales", tgt)
 
 
 # Testing group_by operator for pandas and spark dataframes
 class TestGroupBy(unittest.TestCase):
-    # Get go_sales dataset in pandas and spark dataframes
-    def setUp(self):
-        self.go_sales = fetch_go_sales_dataset()
-        self.go_sales_spark = fetch_go_sales_dataset("spark")
+    @classmethod
+    def setUpClass(cls):
+        targets: List[datatype_param_type] = ["pandas", "spark"]
+        cls.tgt2datasets = {tgt: fetch_go_sales_dataset(tgt) for tgt in targets}
 
-    def test_groupby_pandas(self):
+    def test_groupby(self):
         trainable = GroupBy(by=[it["Product line"]])
-        go_products = self.go_sales[3]
-        assert get_table_name(go_products) == "go_products"
-        grouped_df = trainable.transform(go_products)
-        self.assertEqual(grouped_df.ngroups, 5)
+        for tgt, datasets in self.tgt2datasets.items():
+            go_products = datasets[3]
+            assert get_table_name(go_products) == "go_products"
+            grouped_df = trainable.transform(go_products)
+            if tgt == "pandas":
+                self.assertEqual(grouped_df.ngroups, 5, tgt)
+            aggregate = Aggregate(columns={"count": count(it["Product line"])})
+            df = _ensure_pandas(aggregate.transform(grouped_df))
+            self.assertEqual(df.shape, (5, 1), tgt)
 
-    def test_groupby_pandas1(self):
+    def test_groupby1(self):
         trainable = GroupBy(by=[it["Product line"], it.Product])
-        go_products = self.go_sales[3]
-        assert get_table_name(go_products) == "go_products"
-        grouped_df = trainable.transform(go_products)
-        self.assertEqual(grouped_df.ngroups, 144)
-
-    def test_groupby_spark(self):
-        trainable = GroupBy(by=[it["Product line"], it.Product])
-        go_products_spark = self.go_sales_spark[3]
-        assert get_table_name(go_products_spark) == "go_products"
-        _ = trainable.transform(go_products_spark)
-
-    def test_groupby_pandas_no_col(self):
-        trainable = GroupBy(by=[it["Product line"], it.Product.name])
-        go_products = self.go_sales[3]
-        assert get_table_name(go_products) == "go_products"
-        with self.assertRaises(ValueError):
-            _ = trainable.transform(go_products)
+        for tgt, datasets in self.tgt2datasets.items():
+            go_products = datasets[3]
+            assert get_table_name(go_products) == "go_products"
+            grouped_df = trainable.transform(go_products)
+            if tgt == "pandas":
+                self.assertEqual(grouped_df.ngroups, 144, tgt)
+            aggregate = Aggregate(columns={"count": count(it["Product line"])})
+            df = _ensure_pandas(aggregate.transform(grouped_df))
+            self.assertEqual(df.shape, (144, 1), tgt)
 
 
-# Testing aggregate operator for pandas dataframes
+# Testing Aggregate operator for both pandas and Spark
 class TestAggregate(unittest.TestCase):
-    # Get go_sales dataset in pandas dataframe
-    def setUp(self):
-        self.go_sales = fetch_go_sales_dataset()
-        trainable = GroupBy(by=[it["Product number"]])
-        self.go_daily_sales = self.go_sales[1]
-        assert get_table_name(self.go_daily_sales) == "go_daily_sales"
-        self.grouped_df_err = trainable.transform(self.go_daily_sales)
-        self.assertEqual(self.grouped_df_err.ngroups, 244)
+    @classmethod
+    def setUpClass(cls):
+        targets: List[datatype_param_type] = ["pandas", "spark"]
+        cls.tgt2datasets = {tgt: fetch_go_sales_dataset(tgt) for tgt in targets}
 
-    def test_aggregate_1(self):
-        trainable = GroupBy(by=[it["Retailer code"]])
-        grouped_df = trainable.transform(self.go_daily_sales)
-        self.assertEqual(grouped_df.ngroups, 289)
-        trainable = Aggregate(columns={"min_quantity": min(it["Quantity"])})
-        aggregated_df = trainable.transform(grouped_df)
-        self.assertEqual(aggregated_df.shape, (289, 1))
-        self.assertEqual(aggregated_df.loc[1698, "min_quantity"], 4)
-        self.assertEqual(aggregated_df.loc[1196, "min_quantity"], 1)
-
-    def test_aggregate_2(self):
-        trainable = GroupBy(by=[it["Product number"], it["Retailer code"]])
-        grouped_df = trainable.transform(self.go_daily_sales)
-        self.assertEqual(grouped_df.ngroups, 5000)
-        trainable = Aggregate(
+    def test_sales_not_grouped_single_col(self):
+        pipeline = Scan(table=it.go_daily_sales) >> Aggregate(
             columns={
-                "mean_quantity": mean(it["Quantity"]),
-                "max_usp": max(it["Unit sale price"]),
-                "count_quantity": count(it["Quantity"]),
+                "min_method_code": min(it["Order method code"]),
+                "max_method_code": max(it["Order method code"]),
+                "collect_set('Order method code')": collect_set(
+                    it["Order method code"]
+                ),
+                "mode_method_code": mode(it["Order method code"]),
+                "median_method_code": median(it["Order method code"]),
             }
         )
-        aggregated_df = trainable.transform(grouped_df)
-        self.assertEqual(aggregated_df.shape, (5000, 3))
-        self.assertEqual(
-            round(aggregated_df.loc[(130130, 1137), "mean_quantity"], 2), 8.74
-        )
-        self.assertEqual(aggregated_df.loc[(147160, 1192), "max_usp"], 32.85)
-        self.assertEqual(aggregated_df.loc[(147120, 1216), "count_quantity"], 52)
+        for tgt, datasets in self.tgt2datasets.items():
+            result = pipeline.transform(datasets)
+            result = _ensure_pandas(result)
+            self.assertEqual(result.shape, (1, 5), tgt)
+            self.assertEqual(result.loc[0, "min_method_code"], 1, tgt)
+            self.assertEqual(result.loc[0, "max_method_code"], 7, tgt)
+            self.assertEqual(
+                sorted(result.loc[0, "collect_set('Order method code')"]),
+                [1, 2, 3, 4, 5, 6, 7],
+                tgt,
+            )
+            self.assertEqual(result.loc[0, "mode_method_code"], 5, tgt)
+            self.assertEqual(result.loc[0, "median_method_code"], 5, tgt)
 
-    def test_aggregate_3(self):
-        trainable = GroupBy(by=[it["Product line"], it["Product brand"]])
-        go_products = self.go_sales[3]
-        assert get_table_name(go_products) == "go_products"
-        grouped_df = trainable.transform(go_products)
-        self.assertEqual(grouped_df.ngroups, 30)
-        trainable = Aggregate(
+    def test_sales_not_grouped_single_func(self):
+        pipeline = Aggregate(
             columns={
-                "sum_uc": sum(it["Unit cost"]),
-                "max_up": max(it["Unit price"]),
-                "max_uc": max(it["Unit cost"]),
-                "min_uc": min(it["Unit cost"]),
-                "min_up": min(it["Unit price"]),
-                "first_uc": first(it["Unit cost"]),
+                "max_method_code": max(it["Order method code"]),
+                "max_method_type": max(it["Order method type"]),
             }
         )
-        aggregated_df = trainable.transform(grouped_df)
-        self.assertEqual(aggregated_df.shape, (30, 6))
-        self.assertEqual(
-            aggregated_df.loc[("Golf Equipment", "Blue Steel"), "first_uc"], 41.2
-        )
-        self.assertEqual(
-            aggregated_df.loc[("Golf Equipment", "Blue Steel"), "max_uc"], 89.41
-        )
-        self.assertEqual(
-            aggregated_df.loc[("Outdoor Protection", "Sun"), "min_uc"], 1.79
-        )
-        self.assertEqual(
-            aggregated_df.loc[("Personal Accessories", "Edge"), "sum_uc"], 89.22
-        )
-        self.assertEqual(
-            aggregated_df.loc[("Mountaineering Equipment", "Granite"), "max_up"], 80
-        )
-        self.assertEqual(
-            aggregated_df.loc[("Personal Accessories", "Xray"), "min_up"], 125.4
-        )
+        for tgt, datasets in self.tgt2datasets.items():
+            result = pipeline.transform(datasets[2])
+            result = _ensure_pandas(result)
+            self.assertEqual(result.shape, (1, 2), tgt)
+            self.assertEqual(result.loc[0, "max_method_code"], 12, tgt)
+            self.assertEqual(result.loc[0, "max_method_type"], "Web", tgt)
 
-    def test_aggregate_no_col_error(self):
-        trainable = Aggregate(columns={"mean_quantity": mean(it["Quantity_1"])})
+    def test_sales_multi_col_not_grouped(self):
+        pipeline = Aggregate(
+            columns={
+                "min_method_code": min(it["Order method code"]),
+                "max_method_code": max(it["Order method code"]),
+                "max_method_type": max(it["Order method type"]),
+            }
+        )
+        for tgt, datasets in self.tgt2datasets.items():
+            result = pipeline.transform(datasets[2])
+            result = _ensure_pandas(result)
+            self.assertEqual(result.shape, (1, 3), tgt)
+            self.assertEqual(result.loc[0, "min_method_code"], 1, tgt)
+            self.assertEqual(result.loc[0, "max_method_code"], 12, tgt)
+            self.assertEqual(result.loc[0, "max_method_type"], "Web", tgt)
+
+    def test_sales_onekey_grouped(self):
+        pipeline = (
+            Scan(table=it.go_daily_sales)
+            >> GroupBy(by=[it["Retailer code"]])
+            >> Aggregate(
+                columns={
+                    "retailer_code": it["Retailer code"],
+                    "min_method_code": min(it["Order method code"]),
+                    "max_method_code": max(it["Order method code"]),
+                    "min_quantity": min(it["Quantity"]),
+                    "method_codes": collect_set(it["Order method code"]),
+                    # Mode is not supported on GroupedData as of now.
+                    # "mode_method_code": mode(it["Order method code"]),
+                    "median_method_code": median(it["Order method code"]),
+                }
+            )
+        )
+        for tgt, datasets in self.tgt2datasets.items():
+            result = pipeline.transform(datasets)
+            result = _ensure_pandas(result)
+            self.assertEqual(result.shape, (289, 6))
+            row = result[result.retailer_code == 1201]
+            self.assertEqual(row.loc[row.index[0], "retailer_code"], 1201, tgt)
+            self.assertEqual(row.loc[row.index[0], "min_method_code"], 2, tgt)
+            self.assertEqual(row.loc[row.index[0], "max_method_code"], 6, tgt)
+            self.assertEqual(row.loc[row.index[0], "min_quantity"], 1, tgt)
+            self.assertEqual(
+                sorted(row.loc[row.index[0], "method_codes"]), [2, 3, 4, 5, 6], tgt
+            )
+            # self.assertEqual(result.loc[row.index[0], "mode_method_code"], 5, tgt)
+            self.assertEqual(result.loc[row.index[0], "median_method_code"], 5, tgt)
+            self.assertEqual(result.index.name, "Retailer code", tgt)
+
+    def test_sales_onekey_grouped_single_col(self):
+        pipeline = (
+            Scan(table=it.go_daily_sales)
+            >> GroupBy(by=[it["Retailer code"]])
+            >> Aggregate(
+                columns={
+                    "min_method_code": min(it["Order method code"]),
+                    "max_method_code": max(it["Order method code"]),
+                    "method_codes": collect_set(it["Order method code"]),
+                    "median_method_code": median(it["Order method code"]),
+                }
+            )
+        )
+        for tgt, datasets in self.tgt2datasets.items():
+            result = pipeline.transform(datasets)
+            result = _ensure_pandas(result)
+            self.assertEqual(result.shape, (289, 4))
+            self.assertEqual(result.loc[1201, "min_method_code"], 2, tgt)
+            self.assertEqual(result.loc[1201, "max_method_code"], 6, tgt)
+            self.assertEqual(
+                sorted(result.loc[1201, "method_codes"]), [2, 3, 4, 5, 6], tgt
+            )
+            self.assertEqual(result.loc[1201, "median_method_code"], 5, tgt)
+            self.assertEqual(result.index.name, "Retailer code", tgt)
+
+    def test_sales_onekey_grouped_single_func(self):
+        pipeline = (
+            Scan(table=it.go_daily_sales)
+            >> GroupBy(by=[it["Retailer code"]])
+            >> Aggregate(
+                columns={
+                    "min_method_code": min(it["Order method code"]),
+                    "min_quantity": min(it["Quantity"]),
+                }
+            )
+        )
+        for tgt, datasets in self.tgt2datasets.items():
+            result = pipeline.transform(datasets)
+            result = _ensure_pandas(result)
+            self.assertEqual(result.shape, (289, 2))
+            self.assertEqual(result.loc[1201, "min_method_code"], 2, tgt)
+            self.assertEqual(result.loc[1201, "min_quantity"], 1, tgt)
+            self.assertEqual(result.index.name, "Retailer code", tgt)
+
+    def test_products_onekey_grouped(self):
+        pipeline = (
+            Scan(table=it.go_products)
+            >> GroupBy(by=[it["Product line"]])
+            >> Aggregate(
+                columns={
+                    "line": first(it["Product line"]),
+                    "mean_uc": mean(it["Unit cost"]),
+                    "min_up": min(it["Unit price"]),
+                    "count_pc": count(it["Product color"]),
+                }
+            )
+        )
+        for tgt, datasets in self.tgt2datasets.items():
+            result = pipeline.transform(datasets)
+            result = _ensure_pandas(result)
+            self.assertEqual(result.shape, (5, 4))
+            row = result[result.line == "Camping Equipment"]
+            self.assertEqual(row.loc[row.index[0], "line"], "Camping Equipment", tgt)
+            self.assertAlmostEqual(row.loc[row.index[0], "mean_uc"], 89.0, 1, tgt)
+            self.assertEqual(row.loc[row.index[0], "min_up"], 2.06, tgt)
+            self.assertEqual(row.loc[row.index[0], "count_pc"], 41, tgt)
+
+    def test_sales_twokeys_grouped(self):
+        pipeline = (
+            Scan(table=it.go_daily_sales)
+            >> GroupBy(by=[it["Product number"], it["Retailer code"]])
+            >> Aggregate(
+                columns={
+                    "product": it["Product number"],
+                    "retailer": it["Retailer code"],
+                    "mean_quantity": mean(it.Quantity),
+                    "max_usp": max(it["Unit sale price"]),
+                    "count_quantity": count(it.Quantity),
+                }
+            )
+        )
+        for tgt, datasets in self.tgt2datasets.items():
+            result = pipeline.transform(datasets)
+            result = _ensure_pandas(result)
+            self.assertEqual(result.shape, (5000, 5))
+            row = result[(result["product"] == 70240) & (result["retailer"] == 1205)]
+            self.assertEqual(row.loc[row.index[0], "product"], 70240, tgt)
+            self.assertEqual(row.loc[row.index[0], "retailer"], 1205, tgt)
+            self.assertAlmostEqual(
+                row.loc[row.index[0], "mean_quantity"], 48.39, 2, tgt
+            )
+            self.assertEqual(row.loc[row.index[0], "max_usp"], 122.70, tgt)
+            self.assertEqual(row.loc[row.index[0], "count_quantity"], 41, tgt)
+            self.assertEqual(
+                result.index.names, ["Product number", "Retailer code"], tgt
+            )
+
+    def test_products_twokeys_grouped(self):
+        pipeline = (
+            Scan(table=it.go_products)
+            >> GroupBy(by=[it["Product line"], it["Product brand"]])
+            >> Aggregate(
+                columns={
+                    "sum_uc": sum(it["Unit cost"]),
+                    "max_uc": max(it["Unit cost"]),
+                    "line": first(it["Product line"]),
+                    "brand": first(it["Product brand"]),
+                }
+            )
+        )
+        for tgt, datasets in self.tgt2datasets.items():
+            result = pipeline.transform(datasets)
+            result = _ensure_pandas(result)
+            self.assertEqual(result.shape, (30, 4))
+            row = result[
+                (result.line == "Camping Equipment") & (result.brand == "Star")
+            ]
+            self.assertEqual(row.loc[row.index[0], "sum_uc"], 1968.19, tgt)
+            self.assertEqual(row.loc[row.index[0], "max_uc"], 490.00, tgt)
+            self.assertEqual(row.loc[row.index[0], "line"], "Camping Equipment", tgt)
+            self.assertEqual(row.loc[row.index[0], "brand"], "Star", tgt)
+
+    def test_error_unknown_column(self):
+        pipeline = (
+            Scan(table=it.go_daily_sales)
+            >> GroupBy(by=[it["Product number"]])
+            >> Aggregate(columns={"mean_quantity": mean(it["Quantity_1"])})
+        )
         with self.assertRaises(KeyError):
-            _ = trainable.transform(self.grouped_df_err)
+            _ = pipeline.transform(self.tgt2datasets["pandas"])
 
-    def test_aggregate_col_not_dict(self):
-        trainable = Aggregate(columns=[mean(it["Quantity_1"])])
+    def test_error_columns_not_dict(self):
+        pipeline = (
+            Scan(table=it.go_daily_sales)
+            >> GroupBy(by=[it["Product number"]])
+            >> Aggregate(columns=[mean(it["Quantity_1"])])
+        )
         with self.assertRaises(ValueError):
-            _ = trainable.transform(self.grouped_df_err)
+            _ = pipeline.transform(self.tgt2datasets["pandas"])
 
-    def test_aggregate_x_not_pd_pysp(self):
+    def test_error_X_not_pandas_or_Spark(self):
         trainable = Aggregate(columns={"mean_quantity": mean(it["Quantity_1"])})
         with self.assertRaises(ValueError):
             _ = trainable.transform(pd.Series([1, 2, 3]))
-
-
-# Testing aggregate operator for spark dataframes
-class TestAggregateSpark(unittest.TestCase):
-    # Get go_sales dataset in spark dataframe
-    def setUp(self):
-        self.go_sales_spark = fetch_go_sales_dataset("spark")
-
-    def test_aggregate_1(self):
-        trainable = GroupBy(by=[it["Product line"], it["Product brand"]])
-        go_products_spark = self.go_sales_spark[3]
-        assert get_table_name(go_products_spark) == "go_products"
-        grouped_df = trainable.transform(go_products_spark)
-        trainable = Aggregate(
-            columns={
-                "sum_uc": sum(it["Unit cost"]),
-                "max_uc": max(it["Unit cost"]),
-                "first_uc": first(it["Unit cost"]),
-            }
-        )
-        aggregated_df = trainable.transform(grouped_df)
-        self.assertEqual(aggregated_df.count(), 30)
-        self.assertEqual(len(aggregated_df.columns), 5)
-        self.assertEqual(
-            round(
-                aggregated_df.filter(
-                    (aggregated_df["Product line"] == "Personal Accessories")
-                    & (aggregated_df["Product brand"] == "Edge")
-                ).collect()[0]["sum_uc"],
-                2,
-            ),
-            89.22,
-        )
-        self.assertEqual(
-            round(
-                aggregated_df.filter(
-                    (aggregated_df["Product line"] == "Golf Equipment")
-                    & (aggregated_df["Product brand"] == "Blue Steel")
-                ).collect()[0]["first_uc"],
-                2,
-            ),
-            41.2,
-        )
-
-    def test_aggregate_2(self):
-        trainable = GroupBy(by=[it["Product line"]])
-        go_products_spark = self.go_sales_spark[3]
-        assert get_table_name(go_products_spark) == "go_products"
-        grouped_df = trainable.transform(go_products_spark)
-        trainable = Aggregate(
-            columns={
-                "mean_uc": mean(it["Unit cost"]),
-                "min_up": min(it["Unit price"]),
-                "count_pc": count(it["Product color"]),
-            }
-        )
-        aggregated_df = trainable.transform(grouped_df)
-        self.assertEqual(aggregated_df.count(), 5)
-        self.assertEqual(len(aggregated_df.columns), 4)
-        self.assertEqual(
-            round(
-                aggregated_df.filter(
-                    (aggregated_df["Product line"] == "Camping Equipment")
-                ).collect()[0]["mean_uc"],
-                2,
-            ),
-            89.01,
-        )
-        self.assertEqual(
-            round(
-                aggregated_df.filter(
-                    (aggregated_df["Product line"] == "Golf Equipment")
-                ).collect()[0]["min_up"],
-                2,
-            ),
-            10.64,
-        )
-        self.assertEqual(
-            aggregated_df.filter(
-                (aggregated_df["Product line"] == "Personal Accessories")
-            ).collect()[0]["count_pc"],
-            182,
-        )
 
 
 # Testing join operator for pandas dataframes
@@ -774,79 +792,113 @@ class TestJoin(unittest.TestCase):
         _ = Join(pred=[it.main.train_id == it.info.TrainId], join_type="inner")
 
     # Define pandas dataframes with different structures
-    def setUp(self):
+    @classmethod
+    def setUpClass(cls):
+        targets: List[datatype_param_type] = ["pandas", "spark"]
+        cls.tgt2datasets = {
+            tgt: {"go_sales": fetch_go_sales_dataset(tgt)} for tgt in targets
+        }
+
+        def add_df(name, df):
+            cls.tgt2datasets["pandas"][name] = df
+            cls.tgt2datasets["spark"][name] = pandas2spark(df)
+
         table1 = {
             "train_id": [1, 2, 3, 4, 5],
             "col1": ["NY", "TX", "CA", "NY", "CA"],
             "col2": [0, 1, 1, 0, 1],
         }
-        self.df1 = add_table_name(pd.DataFrame(data=table1), "main")
+        df1 = add_table_name(pd.DataFrame(data=table1), "main")
+        add_df("df1", df1)
 
         table2 = {
             "TrainId": [1, 2, 3],
             "col3": ["USA", "USA", "UK"],
             "col4": [100, 100, 200],
         }
-        self.df2 = add_table_name(pd.DataFrame(data=table2), "info")
+        df2 = add_table_name(pd.DataFrame(data=table2), "info")
+        add_df("df2", df2)
 
         table3 = {
             "tid": [1, 2, 3],
             "col5": ["Warm", "Cold", "Warm"],
         }
-        self.df3 = add_table_name(pd.DataFrame(data=table3), "t1")
+        df3 = add_table_name(pd.DataFrame(data=table3), "t1")
+        add_df("df3", df3)
 
         table4 = {
             "TrainId": [1, 2, 3, 4, 5],
             "col1": ["NY", "TX", "CA", "NY", "CA"],
             "col2": [0, 1, 1, 0, 1],
         }
-        self.df4 = add_table_name(pd.DataFrame(data=table4), "main")
+        df4 = add_table_name(pd.DataFrame(data=table4), "main")
+        add_df("df4", df4)
 
         table5 = {
             "TrainId": [1, 2, 3],
             "col3": ["NY", "NY", "CA"],
             "col4": [100, 100, 200],
         }
-        self.df5 = add_table_name(pd.DataFrame(data=table5), "info")
+        df5 = add_table_name(pd.DataFrame(data=table5), "info")
+        add_df("df5", df5)
 
         table6 = {
             "t_id": [2, 3],
             "col6": ["USA", "UK"],
         }
-        self.df6 = add_table_name(pd.DataFrame(data=table6), "t2")
+        df6 = add_table_name(pd.DataFrame(data=table6), "t2")
+        add_df("df6", df6)
 
     # Multiple elements in predicate with different key column names
-    def test_join_pandas_multiple_left(self):
+    def test_join_multiple_inner(self):
         trainable = Join(
             pred=[it.main.train_id == it.info.TrainId, it.info.TrainId == it.t1.tid],
             join_type="inner",
         )
-        transformed_df = trainable.transform([self.df1, self.df2, self.df3])
-        self.assertEqual(transformed_df.shape, (3, 8))
-        self.assertEqual(transformed_df["col5"][1], "Cold")
+        for tgt, datasets in self.tgt2datasets.items():
+            df1, df2, df3 = datasets["df1"], datasets["df2"], datasets["df3"]
+            transformed_df = trainable.transform([df1, df2, df3])
+            transformed_df = _ensure_pandas(transformed_df)
+            transformed_df = transformed_df.sort_values(by="train_id").reset_index(
+                drop=True
+            )
+            self.assertEqual(transformed_df.shape, (3, 8), tgt)
+            self.assertEqual(transformed_df["col5"][1], "Cold", tgt)
 
     # Multiple elements in predicate with identical key columns names
-    def test_join_pandas_multiple_left1(self):
+    def test_join_multiple_left(self):
         trainable = Join(
             pred=[it.main.TrainId == it.info.TrainId, it.info.TrainId == it.t1.tid],
             join_type="left",
         )
-        transformed_df = trainable.transform([self.df4, self.df2, self.df3])
-        self.assertEqual(transformed_df.shape, (5, 7))
-        self.assertEqual(transformed_df["col3"][2], "UK")
+        for tgt, datasets in self.tgt2datasets.items():
+            df4, df2, df3 = datasets["df4"], datasets["df2"], datasets["df3"]
+            transformed_df = trainable.transform([df4, df2, df3])
+            transformed_df = _ensure_pandas(transformed_df)
+            transformed_df = transformed_df.sort_values(by="TrainId").reset_index(
+                drop=True
+            )
+            self.assertEqual(transformed_df.shape, (5, 7), tgt)
+            self.assertEqual(transformed_df["col3"][2], "UK", tgt)
 
     # Invert one of the join conditions as compared to the test case: test_join_pandas_multiple_left
-    def test_join_pandas_multiple_right(self):
+    def test_join_multiple_right(self):
         trainable = Join(
             pred=[it.main.train_id == it.info.TrainId, it.t1.tid == it.info.TrainId],
             join_type="right",
         )
-        transformed_df = trainable.transform([self.df1, self.df2, self.df3])
-        self.assertEqual(transformed_df.shape, (3, 8))
-        self.assertEqual(transformed_df["col3"][2], "UK")
+        for tgt, datasets in self.tgt2datasets.items():
+            df1, df2, df3 = datasets["df1"], datasets["df2"], datasets["df3"]
+            transformed_df = trainable.transform([df1, df2, df3])
+            transformed_df = _ensure_pandas(transformed_df)
+            transformed_df = transformed_df.sort_values(by="TrainId").reset_index(
+                drop=True
+            )
+            self.assertEqual(transformed_df.shape, (3, 8), tgt)
+            self.assertEqual(transformed_df["col3"][2], "UK", tgt)
 
     # Composite key join
-    def test_join_pandas_composite(self):
+    def test_join_composite(self):
         trainable = Join(
             pred=[
                 it.t1.tid == it.info.TrainId,
@@ -854,12 +906,23 @@ class TestJoin(unittest.TestCase):
             ],
             join_type="left",
         )
-        transformed_df = trainable.transform([self.df1, self.df5, self.df3, self.df6])
-        self.assertEqual(transformed_df.shape, (5, 8))
-        self.assertEqual(transformed_df["col3"][2], "CA")
+        for tgt, datasets in self.tgt2datasets.items():
+            df1, df5, df3, df6 = (
+                datasets["df1"],
+                datasets["df5"],
+                datasets["df3"],
+                datasets["df6"],
+            )
+            transformed_df = trainable.transform([df1, df5, df3, df6])
+            transformed_df = _ensure_pandas(transformed_df)
+            transformed_df = transformed_df.sort_values(by="train_id").reset_index(
+                drop=True
+            )
+            self.assertEqual(transformed_df.shape, (5, 8), tgt)
+            self.assertEqual(transformed_df["col3"][2], "CA", tgt)
 
     # Invert one of the join conditions as compared to the test case: test_join_pandas_composite
-    def test_join_pandas_composite1(self):
+    def test_join_composite1(self):
         trainable = Join(
             pred=[
                 [it.main.train_id == it.info.TrainId, it.main.col1 == it.info.col3],
@@ -868,17 +931,28 @@ class TestJoin(unittest.TestCase):
             ],
             join_type="inner",
         )
-        transformed_df = trainable.transform([self.df1, self.df5, self.df3, self.df6])
-        self.assertEqual(transformed_df.shape, (1, 10))
-        self.assertEqual(transformed_df["col4"][0], 200)
+        for tgt, datasets in self.tgt2datasets.items():
+            df1, df5, df3, df6 = (
+                datasets["df1"],
+                datasets["df5"],
+                datasets["df3"],
+                datasets["df6"],
+            )
+            transformed_df = trainable.transform([df1, df5, df3, df6])
+            transformed_df = _ensure_pandas(transformed_df)
+            transformed_df = transformed_df.sort_values(by="train_id").reset_index(
+                drop=True
+            )
+            self.assertEqual(transformed_df.shape, (1, 10), tgt)
+            self.assertEqual(transformed_df["col4"][0], 200, tgt)
 
     # Composite key join having conditions involving more than 2 tables
     # This test case execution should throw a ValueError which is handled in the test case itself
-    def test_join_pandas_composite_error(self):
+    def test_join_composite_error(self):
         with self.assertRaisesRegex(
             ValueError, "info.*main.*inFo.* more than two tables"
         ):
-            trainable = Join(
+            _ = Join(
                 pred=[
                     it.t1.tid == it.info.TrainId,
                     [it.main.train_id == it.info.TrainId, it.main.col1 == it.inFo.col3],
@@ -886,13 +960,12 @@ class TestJoin(unittest.TestCase):
                 ],
                 join_type="inner",
             )
-            _ = trainable.transform([self.df1, self.df5, self.df3, self.df6])
 
     # Single joining conditions are not chained
     # This test case execution should throw a ValueError which is handled in the test case itself
-    def test_join_pandas_single_error1(self):
+    def test_join_single_error1(self):
         with self.assertRaisesRegex(ValueError, "t3.*t2.* were used"):
-            trainable = Join(
+            _ = Join(
                 pred=[
                     it.t1.tid == it.info.TrainId,
                     [it.main.train_id == it.info.TrainId, it.main.col1 == it.info.col3],
@@ -900,11 +973,10 @@ class TestJoin(unittest.TestCase):
                 ],
                 join_type="inner",
             )
-            _ = trainable.transform([self.df1, self.df5, self.df3, self.df6])
 
-    def test_join_pandas_composite_nochain_error(self):
+    def test_join_composite_nochain_error(self):
         with self.assertRaisesRegex(ValueError, "t3.*t2.* were used"):
-            trainable = Join(
+            _ = Join(
                 pred=[
                     it.t1.tid == it.info.TrainId,
                     [it.main.train_id == it.info.TrainId, it.main.col1 == it.info.col3],
@@ -912,15 +984,15 @@ class TestJoin(unittest.TestCase):
                 ],
                 join_type="inner",
             )
-            _ = trainable.transform([self.df1, self.df5, self.df3, self.df6])
+            # _ = trainable.transform([self.df1, self.df5, self.df3, self.df6])
 
     # Composite key join having conditions involving more than 2 tables
     # This test case execution should throw a ValueError which is handled in the test case itself
-    def test_join_pandas_composite_error2(self):
+    def test_join_composite_error2(self):
         with self.assertRaisesRegex(
             ValueError, "main.*info.*Main.*inFo.*more than two"
         ):
-            trainable = Join(
+            _ = Join(
                 pred=[
                     it.t1.tid == it.info.TrainId,
                     [it.main.train_id == it.info.TrainId, it.Main.col1 == it.inFo.col3],
@@ -928,39 +1000,56 @@ class TestJoin(unittest.TestCase):
                 ],
                 join_type="inner",
             )
-            _ = trainable.transform([self.df1, self.df5, self.df3, self.df6])
 
     # A table to be joined not present in input X
     # This test case execution should throw a ValueError which is handled in the test case itself
-    def test_join_pandas_composite_error3(self):
-        with self.assertRaises(ValueError):
+    def test_join_composite_error3(self):
+        for _tgt, datasets in self.tgt2datasets.items():
+            df5, df3 = datasets["df5"], datasets["df3"]
+            with self.assertRaises(ValueError):
+                trainable = Join(
+                    pred=[
+                        it.t1.tid == it.info.TrainId,
+                        [
+                            it.main.train_id == it.info.TrainId,
+                            it.main.col1 == it.info.col3,
+                        ],
+                    ],
+                    join_type="inner",
+                )
+                _ = trainable.transform([df5, df3])
+
+    # TestCase 1: Go_Sales dataset with different forms of predicate (join conditions)
+    def test_join_go_sales1(self):
+        for tgt, datasets in self.tgt2datasets.items():
+            go_sales = datasets["go_sales"]
             trainable = Join(
                 pred=[
-                    it.t1.tid == it.info.TrainId,
-                    [it.main.train_id == it.info.TrainId, it.main.col1 == it.info.col3],
+                    it.go_daily_sales["Retailer code"]
+                    == it["go_retailers"]["Retailer code"]
                 ],
                 join_type="inner",
             )
-            _ = trainable.transform([self.df5, self.df3])
-
-    # TestCase 1: Go_Sales dataset with different forms of predicate (join conditions)
-    def test_join_pandas_go_sales1(self):
-        go_sales = fetch_go_sales_dataset()
-        trainable = Join(
-            pred=[
-                it.go_daily_sales["Retailer code"]
-                == it["go_retailers"]["Retailer code"]
-            ],
-            join_type="inner",
-        )
-        transformed_df = trainable.transform(go_sales)
-        self.assertEqual(transformed_df.shape, (149257, 10))
-        self.assertEqual(transformed_df["Country"][4], "United States")
+            transformed_df = trainable.transform(go_sales)
+            order = ["Retailer code", "Product number", "Date"]
+            if tgt == "pandas":
+                transformed_df = transformed_df.sort_values(by=order).reset_index(
+                    drop=True
+                )
+                self.assertEqual(transformed_df.shape, (149257, 10), tgt)
+                self.assertEqual(transformed_df["Country"][4], "France", tgt)
+            elif tgt == "spark":
+                self.assertEqual(len(get_columns(transformed_df)), 10, tgt)
+                self.assertEqual(transformed_df.count(), 149257, tgt)
+                # transformed_df = transformed_df.orderBy(order).collect()
+                # self.assertEqual(transformed_df[4]["Country"], "France", tgt)
+            else:
+                assert False
 
     # TestCase 2: Go_Sales dataset throws error because of duplicate non-key columns
-    def test_join_pandas_go_sales2(self):
-        with self.assertRaises(ValueError):
-            go_sales = fetch_go_sales_dataset()
+    def test_join_go_sales2(self):
+        for _tgt, datasets in self.tgt2datasets.items():
+            go_sales = datasets["go_sales"]
             trainable = Join(
                 pred=[
                     [
@@ -972,240 +1061,99 @@ class TestJoin(unittest.TestCase):
                 ],
                 join_type="left",
             )
-            _ = trainable.transform(go_sales)
-
-
-# Testing join operator for spark dataframes
-class TestJoinSpark(unittest.TestCase):
-    # Define spark dataframes with different structures
-    def setUp(self):
-        if spark_installed:
-            conf = (
-                SparkConf()
-                .setMaster("local[2]")
-                .set("spark.driver.bindAddress", "127.0.0.1")
-            )
-            sc = SparkContext.getOrCreate(conf=conf)
-            sqlContext = SQLContext(sc)
-
-            l1 = [(1, "NY", 0), (2, "TX", 1), (3, "CA", 1), (4, "NY", 0), (5, "CA", 1)]
-            rdd = sc.parallelize(l1)
-            table1 = rdd.map(
-                lambda x: Row(train_id=int(x[0]), col1=x[1], col2=int(x[2]))
-            )
-            self.spark_df1 = add_table_name(sqlContext.createDataFrame(table1), "main")
-
-            l2 = [(1, "USA", 100), (2, "USA", 100), (3, "UK", 200)]
-            rdd = sc.parallelize(l2)
-            table2 = rdd.map(
-                lambda x: Row(TrainId=int(x[0]), col3=x[1], col4=int(x[2]))
-            )
-            self.spark_df2 = add_table_name(sqlContext.createDataFrame(table2), "info")
-
-            l3 = [(1, "Warm"), (2, "Cold"), (3, "Warm")]
-            rdd = sc.parallelize(l3)
-            table3 = rdd.map(lambda x: Row(tid=int(x[0]), col5=x[1]))
-            self.spark_df3 = add_table_name(sqlContext.createDataFrame(table3), "t1")
-
-            l4 = [(1, "NY", 0), (2, "TX", 1), (3, "CA", 1), (4, "NY", 0), (5, "CA", 1)]
-            rdd = sc.parallelize(l4)
-            table4 = rdd.map(
-                lambda x: Row(TrainId=int(x[0]), col1=x[1], col2=int(x[2]))
-            )
-            self.spark_df4 = add_table_name(sqlContext.createDataFrame(table4), "main")
-
-            l5 = [(1, "NY", 100), (2, "NY", 100), (3, "CA", 200)]
-            rdd = sc.parallelize(l5)
-            table5 = rdd.map(
-                lambda x: Row(TrainId=int(x[0]), col3=x[1], col4=int(x[2]))
-            )
-            self.spark_df5 = add_table_name(sqlContext.createDataFrame(table5), "info")
-
-            l6 = [(2, "USA"), (3, "UK")]
-            rdd = sc.parallelize(l6)
-            table6 = rdd.map(lambda x: Row(t_id=int(x[0]), col3=x[1]))
-            self.spark_df6 = add_table_name(sqlContext.createDataFrame(table6), "t2")
-
-    # Multiple elements in predicate with different key column names
-    def test_join_spark_multiple_left(self):
-        if spark_installed:
-            trainable = Join(
-                pred=[
-                    it.main.train_id == it.info.TrainId,
-                    it.info.TrainId == it.t1.tid,
-                ],
-                join_type="inner",
-            )
-            transformed_df = trainable.transform(
-                [self.spark_df1, self.spark_df2, self.spark_df3]
-            )
-            self.assertEqual(transformed_df.count(), 3)
-            self.assertEqual(len(transformed_df.columns), 8)
-            self.assertEqual(
-                transformed_df.sort(["train_id"]).collect()[0]["col5"], "Warm"
-            )
-
-    # Multiple elements in predicate with identical key columns names
-    def test_join_spark_multiple_left1(self):
-        if spark_installed:
-            trainable = Join(
-                pred=[it.main.TrainId == it.info.TrainId, it.info.TrainId == it.t1.tid],
-                join_type="left",
-            )
-            transformed_df = trainable.transform(
-                [self.spark_df4, self.spark_df2, self.spark_df3]
-            )
-            self.assertEqual(transformed_df.count(), 5)
-            self.assertEqual(len(transformed_df.columns), 7)
-            self.assertEqual(
-                transformed_df.sort(["TrainId"]).collect()[2]["col1"], "CA"
-            )
-
-    # Invert one of the join conditions as compared to the test case: test_join_spark_multiple_left
-    def test_join_spark_multiple_right(self):
-        if spark_installed:
-            trainable = Join(
-                pred=[
-                    it.main.train_id == it.info.TrainId,
-                    it.t1.tid == it.info.TrainId,
-                ],
-                join_type="right",
-            )
-            transformed_df = trainable.transform(
-                [self.spark_df1, self.spark_df2, self.spark_df3]
-            )
-            self.assertEqual(transformed_df.count(), 3)
-            self.assertEqual(len(transformed_df.columns), 8)
-            self.assertEqual(transformed_df.sort(["train_id"]).collect()[0]["col2"], 0)
-
-    # Composite key join
-    def test_join_spark_composite(self):
-        if spark_installed:
-            trainable = Join(
-                pred=[
-                    it.t1.tid == it.info.TrainId,
-                    [it.main.train_id == it.info.TrainId, it.main.col1 == it.info.col3],
-                ],
-                join_type="left",
-            )
-            transformed_df = trainable.transform(
-                [self.spark_df1, self.spark_df5, self.spark_df3, self.spark_df6]
-            )
-            self.assertEqual(transformed_df.count(), 5)
-            self.assertEqual(len(transformed_df.columns), 8)
-            self.assertEqual(transformed_df.sort(["train_id"]).collect()[0]["col2"], 0)
-
-    # Invert one of the join conditions as compared to the test case: test_join_pandas_composite
-    def test_join_spark_composite_error_dup_col(self):
-        if spark_installed:
             with self.assertRaises(ValueError):
-                trainable = Join(
-                    pred=[
-                        [
-                            it.main.train_id == it.info.TrainId,
-                            it.main.col1 == it.info.col3,
-                        ],
-                        it.t1.tid == it.info.TrainId,
-                        it.t1.tid == it.t2.t_id,
-                    ],
-                    join_type="left",
-                )
-                _ = trainable.transform(
-                    [self.spark_df1, self.spark_df5, self.spark_df3, self.spark_df6]
-                )
-
-    # Composite key join having conditions involving more than 2 tables
-    # This test case execution should throw a ValueError which is handled in the test case itself
-    def test_join_spark_composite_error(self):
-        if spark_installed:
-            with self.assertRaises(ValueError):
-                trainable = Join(
-                    pred=[
-                        it.t1.tid == it.info.TrainId,
-                        [
-                            it.main.train_id == it.info.TrainId,
-                            it.main.col1 == it.inFo.col3,
-                        ],
-                        it.t1.tid == it.t2.t_id,
-                    ],
-                    join_type="inner",
-                )
-                _ = trainable.transform(
-                    [self.spark_df1, self.spark_df5, self.spark_df3, self.spark_df6]
-                )
-
-    # Joining conditions are not chained
-    # This test case execution should throw a ValueError which is handled in the test case itself
-    def test_join_spark_composite_error1(self):
-        if spark_installed:
-            with self.assertRaises(ValueError):
-                trainable = Join(
-                    pred=[
-                        it.t1.tid == it.info.TrainId,
-                        [
-                            it.main.train_id == it.info.TrainId,
-                            it.main.col1 == it.info.col3,
-                        ],
-                        it.t3.tid == it.t2.t_id,
-                    ],
-                    join_type="inner",
-                )
-                _ = trainable.transform(
-                    [self.spark_df1, self.spark_df5, self.spark_df3, self.spark_df6]
-                )
-
-    # A table to be joined not present in input X
-    # This test case execution should throw a ValueError which is handled in the test case itself
-    def test_join_spark_composite_error2(self):
-        if spark_installed:
-            with self.assertRaises(ValueError):
-                trainable = Join(
-                    pred=[
-                        it.t1.tid == it.info.TrainId,
-                        [
-                            it.main.train_id == it.info.TrainId,
-                            it.main.col1 == it.info.col3,
-                        ],
-                    ],
-                    join_type="inner",
-                )
-                _ = trainable.transform([self.spark_df5, self.spark_df3])
-
-    # TestCase 1: Go_Sales dataset with different forms of predicate (join conditions)
-    def test_join_spark_go_sales1(self):
-        if spark_installed:
-            go_sales = fetch_go_sales_dataset("spark")
-            trainable = Join(
-                pred=[
-                    it.go_daily_sales["Retailer code"]
-                    == it["go_retailers"]["Retailer code"]
-                ],
-                join_type="inner",
-            )
-            transformed_df = trainable.transform(go_sales)
-            self.assertEqual(transformed_df.count(), 149257)
-            self.assertEqual(len(transformed_df.columns), 10)
-
-    # TestCase 2: Go_Sales dataset throws error because of duplicate non-key columns
-    def test_join_spark_go_sales2(self):
-        if spark_installed:
-            with self.assertRaises(ValueError):
-                go_sales = fetch_go_sales_dataset("spark")
-                trainable = Join(
-                    pred=[
-                        [
-                            it["go_1k"]["Retailer code"]
-                            == it.go_daily_sales["Retailer code"],
-                            it.go_1k["Product number"]
-                            == it["go_daily_sales"]["Product number"],
-                        ]
-                    ],
-                    join_type="left",
-                )
                 _ = trainable.transform(go_sales)
+
+    def test_join_index(self):
+        tgt = "spark"
+        trainable = Join(
+            pred=[it.info.idx == it.main.idx, it.info.idx == it.t1.idx],
+            join_type="inner",
+        )
+        df1 = _set_index_name(self.tgt2datasets["pandas"]["df1"], "idx")
+        df2 = _set_index_name(self.tgt2datasets["pandas"]["df2"], "idx")
+        df3 = _set_index_name(self.tgt2datasets["pandas"]["df3"], "idx")
+        df1 = pandas2spark(df1)
+        df2 = pandas2spark(df2)
+        df3 = pandas2spark(df3)
+        transformed_df = trainable.transform([df1, df2, df3])
+        transformed_df = _ensure_pandas(transformed_df)
+        self.assertEqual(transformed_df.index.name, "idx", tgt)
+        transformed_df = transformed_df.sort_values(by="TrainId").reset_index(drop=True)
+        self.assertEqual(transformed_df.shape, (3, 8), tgt)
+        self.assertEqual(transformed_df["col5"][1], "Cold", tgt)
+
+    def test_join_index_multiple_names(self):
+        trainable = Join(
+            pred=[it.info.TrainId == it.main.train_id, it.info.TrainId == it.t1.tid],
+            join_type="inner",
+        )
+        df1 = _set_index(self.tgt2datasets["pandas"]["df1"], "train_id")
+        df2 = _set_index(self.tgt2datasets["pandas"]["df2"], "TrainId")
+        df3 = _set_index(self.tgt2datasets["pandas"]["df3"], "tid")
+        df1 = pandas2spark(df1)
+        df2 = pandas2spark(df2)
+        df3 = pandas2spark(df3)
+        transformed_df = trainable.transform([df1, df2, df3])
+        transformed_df = _ensure_pandas(transformed_df)
+        transformed_df = transformed_df.sort_values(by="TrainId").reset_index(drop=True)
+        self.assertEqual(transformed_df.shape, (3, 6))
+        self.assertEqual(transformed_df["col5"][1], "Cold")
 
 
 class TestMap(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        targets: List[datatype_param_type] = ["pandas", "spark"]
+        cls.tgt2datasets = {
+            tgt: {"go_sales": fetch_go_sales_dataset(tgt)} for tgt in targets
+        }
+
+        def add_df(name, df):
+            cls.tgt2datasets["pandas"][name] = df
+            cls.tgt2datasets["spark"][name] = pandas2spark(df)
+
+        df = pd.DataFrame(
+            {
+                "gender": ["m", "f", "m", "m", "f"],
+                "state": ["NY", "NY", "CA", "NY", "CA"],
+                "status": [0, 1, 1, 0, 1],
+            }
+        )
+        add_df("df", df)
+        df_date = pd.DataFrame(
+            {"date_column": ["2016-05-28", "2016-06-27", "2016-07-26"]}
+        )
+        add_df("df_date", df_date)
+        df_date_alt = pd.DataFrame(
+            {"date_column": ["28/05/2016", "27/06/2016", "26/07/2016"]}
+        )
+        add_df("df_date_alt", df_date_alt)
+        df_date_time = pd.DataFrame(
+            {
+                "date_column": [
+                    "2016-01-01 15:16:45",
+                    "2016-06-28 12:18:51",
+                    "2016-07-28 01:01:01",
+                ]
+            }
+        )
+        add_df("df_date_time", df_date_time)
+        df_num = pd.DataFrame(
+            {
+                "height": [3, 4, 6, 3, 5],
+                "weight": [30, 50, 170, 40, 130],
+                "status": [0, 1, 1, 0, 1],
+            }
+        )
+        add_df("df_num", df_num)
+        df_month = pd.DataFrame(
+            {
+                "month": ["jan", "feb", "mar", "may", "aug"],
+            }
+        )
+        add_df("df_month", df_month)
+
     def test_init(self):
         gender_map = {"m": "Male", "f": "Female"}
         state_map = {"NY": "New York", "CA": "California"}
@@ -1214,92 +1162,103 @@ class TestMap(unittest.TestCase):
     # The rename column functionality implemented as part of identity function for Map operator
     # does not support explicit identity calls for now.
     def test_transform_identity_map(self):
-        d = {
-            "gender": ["m", "f", "m", "m", "f"],
-            "state": ["NY", "NY", "CA", "NY", "CA"],
-            "status": [0, 1, 1, 0, 1],
-        }
-        df = pd.DataFrame(data=d)
         trainable = Map(
             columns={
                 "new_gender": it.gender,
                 "new_status": it["status"],
             }
         )
-        trained = trainable.fit(df)
-        transformed_df = trained.transform(df)
-        self.assertEqual(transformed_df.columns[0], "new_gender")
-        self.assertEqual(transformed_df.columns[2], "new_status")
-        self.assertEqual(len(transformed_df.columns), 3)
+        for tgt, datasets in self.tgt2datasets.items():
+            df = datasets["df"]
+            trained = trainable.fit(df)
+            transformed_df = trained.transform(df)
+            df, transformed_df = _ensure_pandas(df), _ensure_pandas(transformed_df)
+            self.assertEqual(df["gender"][0], transformed_df["new_gender"][0], tgt)
+            self.assertEqual(df["status"][3], transformed_df["new_status"][3], tgt)
+            self.assertEqual(len(transformed_df.columns), 2, tgt)
+
+    def test_transform_identity_map_implicit_name(self):
+        trainable = Map(columns=[identity(it.gender), identity(it["status"])])
+        for tgt, datasets in self.tgt2datasets.items():
+            df = datasets["df"]
+            trained = trainable.fit(df)
+            transformed_df = trained.transform(df)
+            df, transformed_df = _ensure_pandas(df), _ensure_pandas(transformed_df)
+            self.assertEqual(df["gender"][0], transformed_df["gender"][0], tgt)
+            self.assertEqual(df["status"][3], transformed_df["status"][3], tgt)
+            self.assertEqual(len(transformed_df.columns), 2, tgt)
+
+    def test_transform_identity_map_passthrough(self):
+        trainable = Map(
+            columns={
+                "new_gender": it.gender,
+                "new_status": it["status"],
+            },
+            remainder="passthrough",
+        )
+        for _tgt, datasets in self.tgt2datasets.items():
+            df = datasets["df"]
+            trained = trainable.fit(df)
+            transformed_df = trained.transform(df)
+            df, transformed_df = _ensure_pandas(df), _ensure_pandas(transformed_df)
+            self.assertEqual(df["gender"][0], transformed_df["new_gender"][0])
+            self.assertEqual(df["status"][3], transformed_df["new_status"][3])
+            self.assertEqual(df["state"][3], transformed_df["state"][3])
+            self.assertEqual(len(transformed_df.columns), 3)
 
     def test_transform_identity_map_error(self):
-        d = {
-            "gender": ["m", "f", "m", "m", "f"],
-            "state": ["NY", "NY", "CA", "NY", "CA"],
-            "status": [0, 1, 1, 0, 1],
-        }
-        df = pd.DataFrame(data=d)
-        with self.assertRaises(ValueError):
-            trainable = Map(columns={"new_name": identity(it.gender)})
-            trained = trainable.fit(df)
-            _ = trained.transform(df)
-        with self.assertRaises(ValueError):
-            trainable = Map(columns={"   ": it.gender})
-            trained = trainable.fit(df)
-            _ = trained.transform(df)
-        with self.assertRaises(ValueError):
-            trainable = Map(columns={"new_name": it["  "]})
-            trained = trainable.fit(df)
-            _ = trained.transform(df)
-        with self.assertRaises(ValueError):
-            trainable = Map(columns=[it.gender])
-            trained = trainable.fit(df)
-            _ = trained.transform(df)
+        for _tgt, datasets in self.tgt2datasets.items():
+            df = datasets["df"]
+            with self.assertRaises(ValueError):
+                trainable = Map(columns={"   ": it.gender})
+                trained = trainable.fit(df)
+                _ = trained.transform(df)
+            with self.assertRaises(ValueError):
+                trainable = Map(columns={"new_name": it["  "]})
+                trained = trainable.fit(df)
+                _ = trained.transform(df)
+            with self.assertRaises(ValueError):
+                trainable = Map(columns=[it.gender])
+                trained = trainable.fit(df)
+                _ = trained.transform(df)
+            with self.assertRaises(ValueError):
+                trainable = Map(columns=[it.dummy])
+                trained = trainable.fit(df)
+                _ = trained.transform(df)
 
     def test_transform_replace_list_and_remainder(self):
-        d = {
-            "gender": ["m", "f", "m", "m", "f"],
-            "state": ["NY", "NY", "CA", "NY", "CA"],
-            "status": [0, 1, 1, 0, 1],
-        }
-        df = pd.DataFrame(data=d)
         gender_map = {"m": "Male", "f": "Female"}
         state_map = {"NY": "New York", "CA": "California"}
         trainable = Map(
             columns=[replace(it.gender, gender_map), replace(it.state, state_map)],
-            remainder="drop",
+            remainder="passthrough",
         )
-        trained = trainable.fit(df)
-        transformed_df = trained.transform(df)
-        self.assertEqual(transformed_df.shape, (5, 2))
-        self.assertEqual(transformed_df["gender"][0], "Male")
-        self.assertEqual(transformed_df["state"][0], "New York")
+        for _tgt, datasets in self.tgt2datasets.items():
+            df = datasets["df"]
+            trained = trainable.fit(df)
+            transformed_df = trained.transform(df)
+            df, transformed_df = _ensure_pandas(df), _ensure_pandas(transformed_df)
+            self.assertEqual(transformed_df.shape, (5, 3))
+            self.assertEqual(transformed_df["gender"][0], "Male")
+            self.assertEqual(transformed_df["state"][0], "New York")
+            self.assertEqual(transformed_df["status"][0], 0)
 
     def test_transform_replace_list(self):
-        d = {
-            "gender": ["m", "f", "m", "m", "f"],
-            "state": ["NY", "NY", "CA", "NY", "CA"],
-            "status": [0, 1, 1, 0, 1],
-        }
-        df = pd.DataFrame(data=d)
         gender_map = {"m": "Male", "f": "Female"}
         state_map = {"NY": "New York", "CA": "California"}
         trainable = Map(
             columns=[replace(it.gender, gender_map), replace(it.state, state_map)]
         )
-        trained = trainable.fit(df)
-        transformed_df = trained.transform(df)
-        self.assertEqual(transformed_df.shape, (5, 3))
-        self.assertEqual(transformed_df["gender"][0], "Male")
-        self.assertEqual(transformed_df["state"][0], "New York")
+        for _tgt, datasets in self.tgt2datasets.items():
+            df = datasets["df"]
+            trained = trainable.fit(df)
+            transformed_df = trained.transform(df)
+            df, transformed_df = _ensure_pandas(df), _ensure_pandas(transformed_df)
+            self.assertEqual(transformed_df.shape, (5, 2))
+            self.assertEqual(transformed_df["gender"][0], "Male")
+            self.assertEqual(transformed_df["state"][0], "New York")
 
     def test_transform_replace_map(self):
-        d = {
-            "gender": ["m", "f", "m", "m", "f"],
-            "state": ["NY", "NY", "CA", "NY", "CA"],
-            "status": [0, 1, 1, 0, 1],
-        }
-        df = pd.DataFrame(data=d)
         gender_map = {"m": "Male", "f": "Female"}
         state_map = {"NY": "New York", "CA": "California"}
         trainable = Map(
@@ -1308,279 +1267,327 @@ class TestMap(unittest.TestCase):
                 "new_state": replace(it.state, state_map),
             }
         )
-        trained = trainable.fit(df)
-        transformed_df = trained.transform(df)
-        self.assertEqual(transformed_df.shape, (5, 3))
-        self.assertEqual(transformed_df["new_gender"][0], "Male")
-        self.assertEqual(transformed_df["new_state"][0], "New York")
+        for _tgt, datasets in self.tgt2datasets.items():
+            df = datasets["df"]
+            trained = trainable.fit(df)
+            transformed_df = trained.transform(df)
+            df, transformed_df = _ensure_pandas(df), _ensure_pandas(transformed_df)
+            self.assertEqual(transformed_df.shape, (5, 2))
+            self.assertEqual(transformed_df["new_gender"][0], "Male")
+            self.assertEqual(transformed_df["new_state"][0], "New York")
 
     def test_transform_dom_list(self):
-        df = pd.DataFrame({"date_column": ["2016-05-28", "2016-06-27", "2016-07-26"]})
         trainable = Map(columns=[day_of_month(it.date_column)])
-        trained = trainable.fit(df)
-        transformed_df = trained.transform(df)
-        self.assertEqual(transformed_df["date_column"][0], 28)
-        self.assertEqual(transformed_df["date_column"][1], 27)
-        self.assertEqual(transformed_df["date_column"][2], 26)
+        for _tgt, datasets in self.tgt2datasets.items():
+            df = datasets["df_date"]
+            trained = trainable.fit(df)
+            transformed_df = trained.transform(df)
+            df, transformed_df = _ensure_pandas(df), _ensure_pandas(transformed_df)
+            self.assertEqual(transformed_df["date_column"][0], 28)
+            self.assertEqual(transformed_df["date_column"][1], 27)
+            self.assertEqual(transformed_df["date_column"][2], 26)
 
     def test_transform_dom_fmt_list(self):
-        df = pd.DataFrame({"date_column": ["2016-05-28", "2016-06-27", "2016-07-26"]})
-        trainable = Map(columns=[day_of_month(it.date_column, "%Y-%m-%d")])
-        trained = trainable.fit(df)
-        transformed_df = trained.transform(df)
-        self.assertEqual(transformed_df["date_column"][0], 28)
-        self.assertEqual(transformed_df["date_column"][1], 27)
-        self.assertEqual(transformed_df["date_column"][2], 26)
+        for tgt, datasets in self.tgt2datasets.items():
+            if tgt == "pandas":
+                trainable = Map(columns=[day_of_month(it.date_column, "%Y-%m-%d")])
+            elif tgt == "spark":
+                trainable = Map(columns=[day_of_month(it.date_column, "y-M-d")])
+            else:
+                assert False
+            df = datasets["df_date"]
+            trained = trainable.fit(df)
+            transformed_df = trained.transform(df)
+            df, transformed_df = _ensure_pandas(df), _ensure_pandas(transformed_df)
+            self.assertEqual(transformed_df["date_column"][0], 28)
+            self.assertEqual(transformed_df["date_column"][1], 27)
+            self.assertEqual(transformed_df["date_column"][2], 26)
 
     def test_transform_dom_fmt_map(self):
-        df = pd.DataFrame({"date_column": ["2016-05-28", "2016-06-27", "2016-07-26"]})
-        trainable = Map(columns={"dom": day_of_month(it.date_column, "%Y-%m-%d")})
-        trained = trainable.fit(df)
-        transformed_df = trained.transform(df)
-        self.assertEqual(transformed_df.shape, (3, 1))
-        self.assertEqual(transformed_df["dom"][0], 28)
-        self.assertEqual(transformed_df["dom"][1], 27)
-        self.assertEqual(transformed_df["dom"][2], 26)
+        for tgt, datasets in self.tgt2datasets.items():
+            if tgt == "pandas":
+                trainable = Map(
+                    columns={"dom": day_of_month(it.date_column, "%Y-%m-%d")}
+                )
+            elif tgt == "spark":
+                trainable = Map(columns={"dom": day_of_month(it.date_column, "y-M-d")})
+            else:
+                assert False
+            df = datasets["df_date"]
+            trained = trainable.fit(df)
+            transformed_df = trained.transform(df)
+            df, transformed_df = _ensure_pandas(df), _ensure_pandas(transformed_df)
+            self.assertEqual(transformed_df.shape, (3, 1))
+            self.assertEqual(transformed_df["dom"][0], 28)
+            self.assertEqual(transformed_df["dom"][1], 27)
+            self.assertEqual(transformed_df["dom"][2], 26)
 
     def test_transform_dow_list(self):
-        df = pd.DataFrame({"date_column": ["2016-05-28", "2016-06-28", "2016-07-28"]})
         trainable = Map(columns=[day_of_week(it.date_column)])
-        trained = trainable.fit(df)
-        transformed_df = trained.transform(df)
-        self.assertEqual(transformed_df["date_column"][0], 5)
-        self.assertEqual(transformed_df["date_column"][1], 1)
-        self.assertEqual(transformed_df["date_column"][2], 3)
+        for tgt, datasets in self.tgt2datasets.items():
+            # Spark and Pandas have a different semantics for `day_of_week`
+            df = datasets["df_date"]
+            trained = trainable.fit(df)
+            transformed_df = trained.transform(df)
+            if tgt == "pandas":
+                self.assertEqual(transformed_df["date_column"][0], 5)
+                self.assertEqual(transformed_df["date_column"][1], 0)
+                self.assertEqual(transformed_df["date_column"][2], 1)
+            elif tgt == "spark":
+                df, transformed_df = _ensure_pandas(df), _ensure_pandas(transformed_df)
+                self.assertEqual(transformed_df["date_column"][0], 7)
+                self.assertEqual(transformed_df["date_column"][1], 2)
+                self.assertEqual(transformed_df["date_column"][2], 3)
+            else:
+                assert False
 
     def test_transform_dow_fmt_list(self):
-        df = pd.DataFrame({"date_column": ["2016-05-28", "2016-06-28", "2016-07-28"]})
-        trainable = Map(columns=[day_of_week(it.date_column, "%Y-%m-%d")])
-        trained = trainable.fit(df)
-        transformed_df = trained.transform(df)
-        self.assertEqual(transformed_df["date_column"][0], 5)
-        self.assertEqual(transformed_df["date_column"][1], 1)
-        self.assertEqual(transformed_df["date_column"][2], 3)
+        for tgt, datasets in self.tgt2datasets.items():
+            if tgt == "pandas":
+                trainable = Map(columns=[day_of_week(it.date_column, "%Y-%m-%d")])
+                df = datasets["df_date"]
+                trained = trainable.fit(df)
+                transformed_df = trained.transform(df)
+                self.assertEqual(transformed_df.shape, (3, 1))
+                self.assertEqual(transformed_df["date_column"][0], 5)
+                self.assertEqual(transformed_df["date_column"][1], 0)
+                self.assertEqual(transformed_df["date_column"][2], 1)
+            elif tgt == "spark":
+                trainable = Map(columns=[day_of_week(it.date_column, "y-M-d")])
+                df = datasets["df_date"]
+                trained = trainable.fit(df)
+                transformed_df = trained.transform(df)
+                df, transformed_df = _ensure_pandas(df), _ensure_pandas(transformed_df)
+                self.assertEqual(transformed_df.shape, (3, 1))
+                self.assertEqual(transformed_df["date_column"][0], 7)
+                self.assertEqual(transformed_df["date_column"][1], 2)
+                self.assertEqual(transformed_df["date_column"][2], 3)
+            else:
+                assert False
 
     def test_transform_dow_fmt_map(self):
-        df = pd.DataFrame({"date_column": ["2016-05-28", "2016-06-28", "2016-07-28"]})
-        trainable = Map(columns={"dow": day_of_week(it.date_column, "%Y-%m-%d")})
-        trained = trainable.fit(df)
-        transformed_df = trained.transform(df)
-        self.assertEqual(transformed_df.shape, (3, 1))
-        self.assertEqual(transformed_df["dow"][0], 5)
-        self.assertEqual(transformed_df["dow"][1], 1)
-        self.assertEqual(transformed_df["dow"][2], 3)
+        for tgt, datasets in self.tgt2datasets.items():
+            if tgt == "pandas":
+                trainable = Map(
+                    columns={"dow": day_of_week(it.date_column, "%Y-%m-%d")}
+                )
+                df = datasets["df_date"]
+                trained = trainable.fit(df)
+                transformed_df = trained.transform(df)
+                df, transformed_df = _ensure_pandas(df), _ensure_pandas(transformed_df)
+                self.assertEqual(transformed_df.shape, (3, 1))
+                self.assertEqual(transformed_df["dow"][0], 5)
+                self.assertEqual(transformed_df["dow"][1], 0)
+                self.assertEqual(transformed_df["dow"][2], 1)
+            elif tgt == "spark":
+                trainable = Map(columns={"dow": day_of_week(it.date_column, "y-M-d")})
+                df = datasets["df_date"]
+                trained = trainable.fit(df)
+                transformed_df = trained.transform(df)
+                df, transformed_df = _ensure_pandas(df), _ensure_pandas(transformed_df)
+                self.assertEqual(transformed_df.shape, (3, 1))
+                self.assertEqual(transformed_df["dow"][0], 7)
+                self.assertEqual(transformed_df["dow"][1], 2)
+                self.assertEqual(transformed_df["dow"][2], 3)
+            else:
+                assert False
 
     def test_transform_doy_list(self):
-        df = pd.DataFrame({"date_column": ["2016-01-01", "2016-06-28", "2016-07-28"]})
         trainable = Map(columns=[day_of_year(it.date_column)])
-        trained = trainable.fit(df)
-        transformed_df = trained.transform(df)
-        self.assertEqual(transformed_df["date_column"][0], 1)
-        self.assertEqual(transformed_df["date_column"][1], 180)
-        self.assertEqual(transformed_df["date_column"][2], 210)
+        for _tgt, datasets in self.tgt2datasets.items():
+            df = datasets["df_date"]
+            trained = trainable.fit(df)
+            transformed_df = trained.transform(df)
+            df, transformed_df = _ensure_pandas(df), _ensure_pandas(transformed_df)
+            self.assertEqual(transformed_df["date_column"][0], 149)
+            self.assertEqual(transformed_df["date_column"][1], 179)
+            self.assertEqual(transformed_df["date_column"][2], 208)
 
     def test_transform_doy_fmt_list(self):
-        df = pd.DataFrame({"date_column": ["2016-01-01", "2016-06-28", "2016-07-28"]})
-        trainable = Map(columns=[day_of_year(it.date_column, "%Y-%m-%d")])
-        trained = trainable.fit(df)
-        transformed_df = trained.transform(df)
-        self.assertEqual(transformed_df["date_column"][0], 1)
-        self.assertEqual(transformed_df["date_column"][1], 180)
-        self.assertEqual(transformed_df["date_column"][2], 210)
+        for tgt, datasets in self.tgt2datasets.items():
+            if tgt == "pandas":
+                trainable = Map(columns=[day_of_year(it.date_column, "%Y-%m-%d")])
+            elif tgt == "spark":
+                trainable = Map(columns=[day_of_year(it.date_column, "y-M-d")])
+            else:
+                assert False
+            df = datasets["df_date"]
+            trained = trainable.fit(df)
+            transformed_df = trained.transform(df)
+            df, transformed_df = _ensure_pandas(df), _ensure_pandas(transformed_df)
+            self.assertEqual(transformed_df["date_column"][0], 149)
+            self.assertEqual(transformed_df["date_column"][1], 179)
+            self.assertEqual(transformed_df["date_column"][2], 208)
 
     def test_transform_doy_fmt_map(self):
-        df = pd.DataFrame({"date_column": ["2016-01-01", "2016-06-28", "2016-07-28"]})
-        trainable = Map(columns={"doy": day_of_year(it.date_column, "%Y-%m-%d")})
-        trained = trainable.fit(df)
-        transformed_df = trained.transform(df)
-        self.assertEqual(transformed_df.shape, (3, 1))
-        self.assertEqual(transformed_df["doy"][0], 1)
-        self.assertEqual(transformed_df["doy"][1], 180)
-        self.assertEqual(transformed_df["doy"][2], 210)
+        for tgt, datasets in self.tgt2datasets.items():
+            if tgt == "pandas":
+                trainable = Map(
+                    columns={"doy": day_of_year(it.date_column, "%Y-%m-%d")}
+                )
+            elif tgt == "spark":
+                trainable = Map(columns={"doy": day_of_year(it.date_column, "y-M-d")})
+            else:
+                assert False
+            df = datasets["df_date"]
+            trained = trainable.fit(df)
+            transformed_df = trained.transform(df)
+            df, transformed_df = _ensure_pandas(df), _ensure_pandas(transformed_df)
+            self.assertEqual(transformed_df.shape, (3, 1))
+            self.assertEqual(transformed_df["doy"][0], 149)
+            self.assertEqual(transformed_df["doy"][1], 179)
+            self.assertEqual(transformed_df["doy"][2], 208)
 
     def test_transform_hour_list(self):
-        df = pd.DataFrame(
-            {
-                "date_column": [
-                    "2016-01-01 15:16:45",
-                    "2016-06-28 12:18:51",
-                    "2016-07-28 01:01:01",
-                ]
-            }
-        )
         trainable = Map(columns=[hour(it.date_column)])
-        trained = trainable.fit(df)
-        transformed_df = trained.transform(df)
-        self.assertEqual(transformed_df["date_column"][0], 15)
-        self.assertEqual(transformed_df["date_column"][1], 12)
-        self.assertEqual(transformed_df["date_column"][2], 1)
+        for _tgt, datasets in self.tgt2datasets.items():
+            df = datasets["df_date_time"]
+            trained = trainable.fit(df)
+            transformed_df = trained.transform(df)
+            df, transformed_df = _ensure_pandas(df), _ensure_pandas(transformed_df)
+            self.assertEqual(transformed_df["date_column"][0], 15)
+            self.assertEqual(transformed_df["date_column"][1], 12)
+            self.assertEqual(transformed_df["date_column"][2], 1)
 
     def test_transform_hour_fmt_list(self):
-        df = pd.DataFrame(
-            {
-                "date_column": [
-                    "2016-01-01 15:16:45",
-                    "2016-06-28 12:18:51",
-                    "2016-07-28 01:01:01",
-                ]
-            }
-        )
-        trainable = Map(columns=[hour(it.date_column, "%Y-%m-%d %H:%M:%S")])
-        trained = trainable.fit(df)
-        transformed_df = trained.transform(df)
-        self.assertEqual(transformed_df["date_column"][0], 15)
-        self.assertEqual(transformed_df["date_column"][1], 12)
-        self.assertEqual(transformed_df["date_column"][2], 1)
+        for tgt, datasets in self.tgt2datasets.items():
+            if tgt == "pandas":
+                trainable = Map(columns=[hour(it.date_column, "%Y-%m-%d %H:%M:%S")])
+            elif tgt == "spark":
+                trainable = Map(columns=[hour(it.date_column, "y-M-d HH:mm:ss")])
+            else:
+                assert False
+            df = datasets["df_date_time"]
+            trained = trainable.fit(df)
+            transformed_df = trained.transform(df)
+            df, transformed_df = _ensure_pandas(df), _ensure_pandas(transformed_df)
+            self.assertEqual(transformed_df["date_column"][0], 15)
+            self.assertEqual(transformed_df["date_column"][1], 12)
+            self.assertEqual(transformed_df["date_column"][2], 1)
 
     def test_transform_hour_fmt_map(self):
-        df = pd.DataFrame(
-            {
-                "date_column": [
-                    "2016-01-01 15:16:45",
-                    "2016-06-28 12:18:51",
-                    "2016-07-28 01:01:01",
-                ]
-            }
-        )
-        trainable = Map(columns={"hour": hour(it.date_column, "%Y-%m-%d %H:%M:%S")})
-        trained = trainable.fit(df)
-        transformed_df = trained.transform(df)
-        self.assertEqual(transformed_df.shape, (3, 1))
-        self.assertEqual(transformed_df["hour"][0], 15)
-        self.assertEqual(transformed_df["hour"][1], 12)
-        self.assertEqual(transformed_df["hour"][2], 1)
+        for tgt, datasets in self.tgt2datasets.items():
+            if tgt == "pandas":
+                trainable = Map(
+                    columns={"hour": hour(it.date_column, "%Y-%m-%d %H:%M:%S")}
+                )
+            elif tgt == "spark":
+                trainable = Map(
+                    columns={"hour": hour(it.date_column, "y-M-d HH:mm:ss")}
+                )
+            else:
+                assert False
+            df = datasets["df_date_time"]
+            trained = trainable.fit(df)
+            transformed_df = trained.transform(df)
+            df, transformed_df = _ensure_pandas(df), _ensure_pandas(transformed_df)
+            self.assertEqual(transformed_df.shape, (3, 1))
+            self.assertEqual(transformed_df["hour"][0], 15)
+            self.assertEqual(transformed_df["hour"][1], 12)
+            self.assertEqual(transformed_df["hour"][2], 1)
 
     def test_transform_minute_list(self):
-        df = pd.DataFrame(
-            {
-                "date_column": [
-                    "2016-01-01 15:16:45",
-                    "2016-06-28 12:18:51",
-                    "2016-07-28 01:01:01",
-                ]
-            }
-        )
         trainable = Map(columns=[minute(it.date_column)])
-        trained = trainable.fit(df)
-        transformed_df = trained.transform(df)
-        self.assertEqual(transformed_df["date_column"][0], 16)
-        self.assertEqual(transformed_df["date_column"][1], 18)
-        self.assertEqual(transformed_df["date_column"][2], 1)
+        for _tgt, datasets in self.tgt2datasets.items():
+            df = datasets["df_date_time"]
+            trained = trainable.fit(df)
+            transformed_df = trained.transform(df)
+            df, transformed_df = _ensure_pandas(df), _ensure_pandas(transformed_df)
+            self.assertEqual(transformed_df["date_column"][0], 16)
+            self.assertEqual(transformed_df["date_column"][1], 18)
+            self.assertEqual(transformed_df["date_column"][2], 1)
 
     def test_transform_minute_fmt_list(self):
-        df = pd.DataFrame(
-            {
-                "date_column": [
-                    "2016-01-01 15:16:45",
-                    "2016-06-28 12:18:51",
-                    "2016-07-28 01:01:01",
-                ]
-            }
-        )
-        trainable = Map(columns=[minute(it.date_column, "%Y-%m-%d %H:%M:%S")])
-        trained = trainable.fit(df)
-        transformed_df = trained.transform(df)
-        self.assertEqual(transformed_df["date_column"][0], 16)
-        self.assertEqual(transformed_df["date_column"][1], 18)
-        self.assertEqual(transformed_df["date_column"][2], 1)
+        for tgt, datasets in self.tgt2datasets.items():
+            if tgt == "pandas":
+                trainable = Map(columns=[minute(it.date_column, "%Y-%m-%d %H:%M:%S")])
+            elif tgt == "spark":
+                trainable = Map(columns=[minute(it.date_column, "y-M-d HH:mm:ss")])
+            else:
+                assert False
+            df = datasets["df_date_time"]
+            trained = trainable.fit(df)
+            transformed_df = trained.transform(df)
+            df, transformed_df = _ensure_pandas(df), _ensure_pandas(transformed_df)
+            self.assertEqual(transformed_df["date_column"][0], 16)
+            self.assertEqual(transformed_df["date_column"][1], 18)
+            self.assertEqual(transformed_df["date_column"][2], 1)
 
     def test_transform_minute_fmt_map(self):
-        df = pd.DataFrame(
-            {
-                "date_column": [
-                    "2016-01-01 15:16:45",
-                    "2016-06-28 12:18:51",
-                    "2016-07-28 01:01:01",
-                ]
-            }
-        )
-        trainable = Map(columns={"minute": minute(it.date_column, "%Y-%m-%d %H:%M:%S")})
-        trained = trainable.fit(df)
-        transformed_df = trained.transform(df)
-        self.assertEqual(transformed_df.shape, (3, 1))
-        self.assertEqual(transformed_df["minute"][0], 16)
-        self.assertEqual(transformed_df["minute"][1], 18)
-        self.assertEqual(transformed_df["minute"][2], 1)
+        for tgt, datasets in self.tgt2datasets.items():
+            if tgt == "pandas":
+                trainable = Map(
+                    columns={"minute": minute(it.date_column, "%Y-%m-%d %H:%M:%S")}
+                )
+            elif tgt == "spark":
+                trainable = Map(
+                    columns={"minute": minute(it.date_column, "y-M-d HH:mm:ss")}
+                )
+            else:
+                assert False
+            df = datasets["df_date_time"]
+            trained = trainable.fit(df)
+            transformed_df = trained.transform(df)
+            df, transformed_df = _ensure_pandas(df), _ensure_pandas(transformed_df)
+            self.assertEqual(transformed_df.shape, (3, 1))
+            self.assertEqual(transformed_df["minute"][0], 16)
+            self.assertEqual(transformed_df["minute"][1], 18)
+            self.assertEqual(transformed_df["minute"][2], 1)
 
     def test_transform_month_list(self):
-        df = pd.DataFrame(
-            {
-                "date_column": [
-                    "2016-01-01 15:16:45",
-                    "2016-06-28 12:18:51",
-                    "2016-07-28 01:01:01",
-                ]
-            }
-        )
         trainable = Map(columns=[month(it.date_column)])
-        trained = trainable.fit(df)
-        transformed_df = trained.transform(df)
-        self.assertEqual(transformed_df["date_column"][0], 1)
-        self.assertEqual(transformed_df["date_column"][1], 6)
-        self.assertEqual(transformed_df["date_column"][2], 7)
+        for _tgt, datasets in self.tgt2datasets.items():
+            df = datasets["df_date_time"]
+            trained = trainable.fit(df)
+            transformed_df = trained.transform(df)
+            df, transformed_df = _ensure_pandas(df), _ensure_pandas(transformed_df)
+            self.assertEqual(transformed_df["date_column"][0], 1)
+            self.assertEqual(transformed_df["date_column"][1], 6)
+            self.assertEqual(transformed_df["date_column"][2], 7)
 
     def test_transform_month_fmt_list(self):
-        df = pd.DataFrame(
-            {
-                "date_column": [
-                    "2016-01-01 15:16:45",
-                    "2016-06-28 12:18:51",
-                    "2016-07-28 01:01:01",
-                ]
-            }
-        )
-        trainable = Map(columns=[month(it.date_column, "%Y-%m-%d %H:%M:%S")])
-        trained = trainable.fit(df)
-        transformed_df = trained.transform(df)
-        self.assertEqual(transformed_df["date_column"][0], 1)
-        self.assertEqual(transformed_df["date_column"][1], 6)
-        self.assertEqual(transformed_df["date_column"][2], 7)
+        for tgt, datasets in self.tgt2datasets.items():
+            if tgt == "pandas":
+                trainable = Map(columns=[month(it.date_column, "%Y-%m-%d %H:%M:%S")])
+            elif tgt == "spark":
+                trainable = Map(columns=[month(it.date_column, "y-M-d HH:mm:ss")])
+            else:
+                assert False
+            df = datasets["df_date_time"]
+            trained = trainable.fit(df)
+            transformed_df = trained.transform(df)
+            df, transformed_df = _ensure_pandas(df), _ensure_pandas(transformed_df)
+            self.assertEqual(transformed_df["date_column"][0], 1)
+            self.assertEqual(transformed_df["date_column"][1], 6)
+            self.assertEqual(transformed_df["date_column"][2], 7)
 
     def test_transform_month_fmt_map(self):
-        df = pd.DataFrame(
-            {
-                "date_column": [
-                    "2016-01-01 15:16:45",
-                    "2016-06-28 12:18:51",
-                    "2016-07-28 01:01:01",
-                ]
-            }
-        )
-        trainable = Map(columns={"month": month(it.date_column, "%Y-%m-%d %H:%M:%S")})
-        trained = trainable.fit(df)
-        transformed_df = trained.transform(df)
-        self.assertEqual(transformed_df.shape, (3, 1))
-        self.assertEqual(transformed_df["month"][0], 1)
-        self.assertEqual(transformed_df["month"][1], 6)
-        self.assertEqual(transformed_df["month"][2], 7)
-
-    def test_transform_string_indexer_list(self):
-        df = pd.DataFrame({"cat_column": ["a", "b", "b"]})
-        trainable = Map(columns=[string_indexer(it.cat_column)])
-        trained = trainable.fit(df)
-        transformed_df = trained.transform(df)
-        self.assertEqual(transformed_df["cat_column"][0], 1)
-        self.assertEqual(transformed_df["cat_column"][1], 0)
-        self.assertEqual(transformed_df["cat_column"][2], 0)
-
-    def test_transform_string_indexer_map(self):
-        df = pd.DataFrame({"cat_column": ["a", "b", "b"]})
-        trainable = Map(columns={"string_indexed": string_indexer(it.cat_column)})
-        trained = trainable.fit(df)
-        transformed_df = trained.transform(df)
-        self.assertEqual(transformed_df.shape, (3, 1))
-        self.assertEqual(transformed_df["string_indexed"][0], 1)
-        self.assertEqual(transformed_df["string_indexed"][1], 0)
-        self.assertEqual(transformed_df["string_indexed"][2], 0)
+        for tgt, datasets in self.tgt2datasets.items():
+            if tgt == "pandas":
+                trainable = Map(
+                    columns={"month": month(it.date_column, "%Y-%m-%d %H:%M:%S")}
+                )
+            elif tgt == "spark":
+                trainable = Map(
+                    columns={"month": month(it.date_column, "y-M-d HH:mm:ss")}
+                )
+            else:
+                assert False
+            df = datasets["df_date_time"]
+            trained = trainable.fit(df)
+            transformed_df = trained.transform(df)
+            df, transformed_df = _ensure_pandas(df), _ensure_pandas(transformed_df)
+            self.assertEqual(transformed_df.shape, (3, 1))
+            self.assertEqual(transformed_df["month"][0], 1)
+            self.assertEqual(transformed_df["month"][1], 6)
+            self.assertEqual(transformed_df["month"][2], 7)
 
     def test_not_expression(self):
         with EnableSchemaValidation():
             with self.assertRaises(jsonschema.ValidationError):
                 _ = Map(columns=[123, "hello"])
 
-    def test_with_hyperopt(self):
-        from sklearn.datasets import load_iris
-
+    def test_pandas_with_hyperopt(self):
         X, y = load_iris(return_X_y=True)
         gender_map = {"m": "Male", "f": "Female"}
         state_map = {"NY": "New York", "CA": "California"}
@@ -1598,18 +1605,15 @@ class TestMap(unittest.TestCase):
         trained = opt.fit(X, y)
         _ = trained
 
-    def test_with_hyperopt2(self):
-        from lale.expressions import (
-            count,
-            it,
-            max,
-            mean,
-            min,
-            string_indexer,
-            sum,
-            variance,
-        )
+    def test_string_indexer_map(self):
+        trainable = Map(columns={"c": string_indexer(it.date_column)})
+        for _tgt, datasets in self.tgt2datasets.items():
+            df = datasets["df_date_time"]
+            trained = trainable.fit(df)
+            with self.assertRaises(ValueError):
+                _ = trained.transform(df)
 
+    def test_pands_with_hyperopt2(self):
         wrap_imported_operators()
         scan = Scan(table=it["main"])
         scan_0 = Scan(table=it["customers"])
@@ -1621,7 +1625,7 @@ class TestMap(unittest.TestCase):
                 )
             ]
         )
-        map = Map(
+        map_op = Map(
             columns={
                 "[main](group_customer_id)[customers]|number_children|identity": it[
                     "number_children"
@@ -1633,7 +1637,7 @@ class TestMap(unittest.TestCase):
             },
             remainder="drop",
         )
-        pipeline_4 = join >> map
+        pipeline_4 = join >> map_op
         scan_1 = Scan(table=it["purchase"])
         join_0 = Join(
             pred=[(it["main"]["group_id"] == it["purchase"]["group_id"])],
@@ -1727,7 +1731,7 @@ class TestMap(unittest.TestCase):
         )
         pipeline_8 = ConcatFeatures() >> map_3
         relational = Relational(
-            operator=make_pipeline_graph(
+            operator=lale.operators.make_pipeline_graph(
                 steps=[
                     scan,
                     scan_0,
@@ -1761,153 +1765,457 @@ class TestMap(unittest.TestCase):
             )
         )
         pipeline = relational >> (KNeighborsClassifier | LogisticRegression)
-        from sklearn.datasets import load_iris
 
         X, y = load_iris(return_X_y=True)
-        from lale.lib.lale import Hyperopt
 
         opt = Hyperopt(estimator=pipeline, max_evals=2)
         opt.fit(X, y)
 
     def test_transform_ratio_map(self):
-        d = {
-            "height": [3, 4, 6, 3, 5],
-            "weight": [30, 50, 170, 40, 130],
-            "status": [0, 1, 1, 0, 1],
-        }
-        df = pd.DataFrame(data=d)
         trainable = Map(columns={"ratio_h_w": it.height / it.weight})
-        trained = trainable.fit(df)
-        transformed_df = trained.transform(df)
-        self.assertEqual(transformed_df.shape, (5, 4))
-        self.assertEqual(transformed_df["ratio_h_w"][0], 0.1)
+        for _tgt, datasets in self.tgt2datasets.items():
+            df = datasets["df_num"]
+            trained = trainable.fit(df)
+            transformed_df = trained.transform(df)
+            df, transformed_df = _ensure_pandas(df), _ensure_pandas(transformed_df)
+            self.assertEqual(transformed_df.shape, (5, 1))
+            self.assertEqual(transformed_df["ratio_h_w"][0], 0.1)
 
     def test_transform_ratio_map_subscript(self):
-        d = {
-            "height": [3, 4, 6, 3, 5],
-            "weight": [30, 50, 170, 40, 130],
-            "status": [0, 1, 1, 0, 1],
-        }
-        df = pd.DataFrame(data=d)
         trainable = Map(columns={"ratio_h_w": it["height"] / it.weight})
-        trained = trainable.fit(df)
-        transformed_df = trained.transform(df)
-        self.assertEqual(transformed_df.shape, (5, 4))
-        self.assertEqual(transformed_df["ratio_h_w"][0], 0.1)
+        for _tgt, datasets in self.tgt2datasets.items():
+            df = datasets["df_num"]
+            trained = trainable.fit(df)
+            transformed_df = trained.transform(df)
+            df, transformed_df = _ensure_pandas(df), _ensure_pandas(transformed_df)
+            self.assertEqual(transformed_df.shape, (5, 1))
+            self.assertEqual(transformed_df["ratio_h_w"][0], 0.1)
 
     def test_transform_ratio_map_list(self):
-        d = {
-            "height": [3, 4, 6, 3, 5],
-            "weight": [30, 50, 170, 40, 130],
-            "status": [0, 1, 1, 0, 1],
-        }
-        df = pd.DataFrame(data=d)
         trainable = Map(columns=[it.height / it.weight])
-        trained = trainable.fit(df)
-        with self.assertRaises(ValueError):
-            _ = trained.transform(df)
-
-    def test_transform_ratio_map_function_name(self):
-        d = {
-            "height": [3, 4, 6, 3, 5],
-            "weight": [30, 50, 170, 40, 130],
-            "status": [0, 1, 1, 0, 1],
-        }
-        df = pd.DataFrame(data=d)
-        trainable = Map(columns={"ratio_h_w": ratio(it.height, it.weight)})
-        trained = trainable.fit(df)
-        transformed_df = trained.transform(df)
-        self.assertEqual(transformed_df.shape, (5, 4))
-        self.assertEqual(transformed_df["ratio_h_w"][0], 0.1)
-
-    def test_transform_ratio_map_function_name_subscript(self):
-        d = {
-            "height": [3, 4, 6, 3, 5],
-            "weight": [30, 50, 170, 40, 130],
-            "status": [0, 1, 1, 0, 1],
-        }
-        df = pd.DataFrame(data=d)
-        trainable = Map(columns={"ratio_h_w": ratio(it["height"], it.weight)})
-        trained = trainable.fit(df)
-        transformed_df = trained.transform(df)
-        self.assertEqual(transformed_df.shape, (5, 4))
-        self.assertEqual(transformed_df["ratio_h_w"][0], 0.1)
+        for _tgt, datasets in self.tgt2datasets.items():
+            df = datasets["df_num"]
+            trained = trainable.fit(df)
+            with self.assertRaises(ValueError):
+                _ = trained.transform(df)
 
     def test_transform_subtract_map(self):
-        d = {
-            "height": [3, 4, 6, 3, 5],
-            "weight": [30, 50, 170, 40, 130],
-            "status": [0, 1, 1, 0, 1],
-        }
-        df = pd.DataFrame(data=d)
         trainable = Map(columns={"subtract_h_w": it.height - it.weight})
-        trained = trainable.fit(df)
-        transformed_df = trained.transform(df)
-        self.assertEqual(transformed_df.shape, (5, 4))
-        self.assertEqual(transformed_df["subtract_h_w"][0], -27)
+        for _tgt, datasets in self.tgt2datasets.items():
+            df = datasets["df_num"]
+            trained = trainable.fit(df)
+            transformed_df = trained.transform(df)
+            df, transformed_df = _ensure_pandas(df), _ensure_pandas(transformed_df)
+            self.assertEqual(transformed_df.shape, (5, 1))
+            self.assertEqual(transformed_df["subtract_h_w"][0], -27)
 
     def test_transform_subtract_map_subscript(self):
-        d = {
-            "height": [3, 4, 6, 3, 5],
-            "weight": [30, 50, 170, 40, 130],
-            "status": [0, 1, 1, 0, 1],
-        }
-        df = pd.DataFrame(data=d)
         trainable = Map(columns={"subtract_h_w": it["height"] - it.weight})
-        trained = trainable.fit(df)
-        transformed_df = trained.transform(df)
-        self.assertEqual(transformed_df.shape, (5, 4))
-        self.assertEqual(transformed_df["subtract_h_w"][0], -27)
+        for _tgt, datasets in self.tgt2datasets.items():
+            df = datasets["df_num"]
+            trained = trainable.fit(df)
+            transformed_df = trained.transform(df)
+            df, transformed_df = _ensure_pandas(df), _ensure_pandas(transformed_df)
+            self.assertEqual(transformed_df.shape, (5, 1))
+            self.assertEqual(transformed_df["subtract_h_w"][0], -27)
 
     def test_transform_subtract_map_list(self):
-        d = {
-            "height": [3, 4, 6, 3, 5],
-            "weight": [30, 50, 170, 40, 130],
-            "status": [0, 1, 1, 0, 1],
-        }
-        df = pd.DataFrame(data=d)
         trainable = Map(columns=[it.height - it.weight])
-        trained = trainable.fit(df)
-        with self.assertRaises(ValueError):
-            _ = trained.transform(df)
+        for _tgt, datasets in self.tgt2datasets.items():
+            df = datasets["df_num"]
+            trained = trainable.fit(df)
+            with self.assertRaises(ValueError):
+                _ = trained.transform(df)
 
-    def test_transform_subtract_map_function_name(self):
-        d = {
-            "height": [3, 4, 6, 3, 5],
-            "weight": [30, 50, 170, 40, 130],
-            "status": [0, 1, 1, 0, 1],
+    def test_transform_binops(self):
+        trainable = Map(
+            columns={
+                "add_h_w": it["height"] + it.weight,
+                "add_h_2": it["height"] + 2,
+                "sub_h_w": it["height"] - it.weight,
+                "sub_h_2": it["height"] - 2,
+                "mul_h_w": it["height"] * it.weight,
+                "mul_h_2": it["height"] * 2,
+                "div_h_w": it["height"] / it.weight,
+                "div_h_2": it["height"] / 2,
+                "floor_div_h_w": it["height"] // it.weight,
+                "floor_div_h_2": it["height"] // 2,
+                "mod_h_w": it["height"] % it.weight,
+                "mod_h_2": it["height"] % 2,
+                "pow_h_w": it["height"] ** it.weight,
+                "pow_h_2": it["height"] ** 2,
+            }
+        )
+        for tgt, datasets in self.tgt2datasets.items():
+            df = datasets["df_num"]
+            trained = trainable.fit(df)
+            transformed_df = trained.transform(df)
+            df, transformed_df = _ensure_pandas(df), _ensure_pandas(transformed_df)
+            self.assertEqual(transformed_df.shape, (5, 14))
+            self.assertEqual(
+                transformed_df["add_h_w"][1], df["height"][1] + df["weight"][1]
+            )
+            self.assertEqual(transformed_df["add_h_2"][1], df["height"][1] + 2)
+            self.assertEqual(
+                transformed_df["sub_h_w"][1], df["height"][1] - df["weight"][1]
+            )
+            self.assertEqual(transformed_df["sub_h_2"][1], df["height"][1] - 2)
+            self.assertEqual(
+                transformed_df["mul_h_w"][1], df["height"][1] * df["weight"][1]
+            )
+            self.assertEqual(transformed_df["mul_h_2"][1], df["height"][1] * 2)
+            self.assertEqual(
+                transformed_df["div_h_w"][1], df["height"][1] / df["weight"][1]
+            )
+            self.assertEqual(transformed_df["div_h_2"][1], df["height"][1] / 2)
+            self.assertEqual(
+                transformed_df["floor_div_h_w"][1], df["height"][1] // df["weight"][1]
+            )
+            self.assertEqual(transformed_df["floor_div_h_2"][1], df["height"][1] // 2)
+            self.assertEqual(
+                transformed_df["mod_h_w"][1], df["height"][1] % df["weight"][1]
+            )
+            self.assertEqual(transformed_df["mod_h_2"][1], df["height"][1] % 2)
+            if tgt == "pandas":
+                self.assertEqual(
+                    transformed_df["pow_h_w"][1], df["height"][1] ** df["weight"][1]
+                )
+            elif tgt == "spark":
+                # Spark and Pandas have a different semantics for large numbers
+                self.assertEqual(transformed_df["pow_h_w"][1], 4**50)
+            else:
+                assert False
+            self.assertEqual(transformed_df["pow_h_2"][1], df["height"][1] ** 2)
+
+    def test_transform_arithmetic_expression(self):
+        trainable = Map(columns={"expr": (it["height"] + it.weight * 10) / 2})
+        for _tgt, datasets in self.tgt2datasets.items():
+            df = datasets["df_num"]
+            trained = trainable.fit(df)
+            transformed_df = trained.transform(df)
+            df, transformed_df = _ensure_pandas(df), _ensure_pandas(transformed_df)
+            self.assertEqual(transformed_df.shape, (5, 1))
+            self.assertEqual(
+                transformed_df["expr"][2], (df["height"][2] + df["weight"][2] * 10) / 2
+            )
+
+    def test_transform_nested_expressions(self):
+        month_map = {
+            "jan": "2021-01-01",
+            "feb": "2021-02-01",
+            "mar": "2021-03-01",
+            "arp": "2021-04-01",
+            "may": "2021-05-01",
+            "jun": "2021-06-01",
+            "jul": "2021-07-01",
+            "aug": "2021-08-01",
+            "sep": "2021-09-01",
+            "oct": "2021-10-01",
+            "nov": "2021-11-01",
+            "dec": "2021-12-01",
         }
-        df = pd.DataFrame(data=d)
-        trainable = Map(columns={"subtract_h_w": subtract(it.height, it.weight)})
-        trained = trainable.fit(df)
-        transformed_df = trained.transform(df)
-        self.assertEqual(transformed_df.shape, (5, 4))
-        self.assertEqual(transformed_df["subtract_h_w"][0], -27)
+        for tgt, datasets in self.tgt2datasets.items():
+            if tgt == "pandas":
+                trainable = Map(
+                    columns={
+                        "date": replace(it.month, month_map),
+                        "month_id": month(replace(it.month, month_map), "%Y-%m-%d"),
+                        "next_month_id": identity(
+                            month(replace(it.month, month_map), "%Y-%m-%d") % 12 + 1
+                        ),
+                    }
+                )
+            elif tgt == "spark":
+                trainable = Map(
+                    columns={
+                        "date": replace(it.month, month_map),
+                        "month_id": month(replace(it.month, month_map), "y-M-d"),
+                        "next_month_id": identity(
+                            month(replace(it.month, month_map), "y-M-d") % 12 + 1
+                        ),
+                    }
+                )
+            else:
+                assert False
 
-    def test_transform_subtract_map_function_name_subscript(self):
-        d = {
-            "height": [3, 4, 6, 3, 5],
-            "weight": [30, 50, 170, 40, 130],
-            "status": [0, 1, 1, 0, 1],
-        }
-        df = pd.DataFrame(data=d)
-        trainable = Map(columns={"subtract_h_w": subtract(it["height"], it.weight)})
-        trained = trainable.fit(df)
-        transformed_df = trained.transform(df)
-        self.assertEqual(transformed_df.shape, (5, 4))
-        self.assertEqual(transformed_df["subtract_h_w"][0], -27)
+            df = datasets["df_month"]
+            trained = trainable.fit(df)
+            transformed_df = trained.transform(df)
+            df, transformed_df = _ensure_pandas(df), _ensure_pandas(transformed_df)
+            self.assertEqual(transformed_df["date"][0], "2021-01-01")
+            self.assertEqual(transformed_df["date"][1], "2021-02-01")
+            self.assertEqual(transformed_df["month_id"][2], 3)
+            self.assertEqual(transformed_df["month_id"][3], 5)
+            self.assertEqual(transformed_df["next_month_id"][0], 2)
+            self.assertEqual(transformed_df["next_month_id"][3], 6)
+            self.assertEqual(transformed_df["next_month_id"][4], 9)
 
-    # new test with complex arimetic expressions
+    def test_replace_unknown_identity(self):
+        pipeline = Scan(table=it.go_products) >> Map(
+            columns={
+                "prod": it["Product number"],
+                "line": replace(
+                    it["Product line"],
+                    {"Camping Equipment": "C", "Personal Accessories": "P"},
+                ),
+            }
+        )
+        for tgt, datasets in self.tgt2datasets.items():
+            result = pipeline.transform(datasets["go_sales"])
+            result = _ensure_pandas(result)
+            self.assertEqual(result.shape, (274, 2))
+            self.assertEqual(result.loc[0, "prod"], 1110, tgt)
+            self.assertEqual(result.loc[0, "line"], "C", tgt)
+            self.assertEqual(result.loc[117, "prod"], 101110, tgt)
+            self.assertEqual(result.loc[117, "line"], "Golf Equipment", tgt)
+            self.assertEqual(result.loc[273, "prod"], 154150, tgt)
+            self.assertEqual(result.loc[273, "line"], "P", tgt)
+
+    def test_replace_unknown_encoded(self):
+        pipeline = Scan(table=it.go_products) >> Map(
+            columns={
+                "prod": it["Product number"],
+                "line": replace(
+                    it["Product line"],
+                    {"Camping Equipment": "C", "Personal Accessories": "P"},
+                    handle_unknown="use_encoded_value",
+                    unknown_value="U",
+                ),
+            }
+        )
+        for tgt, datasets in self.tgt2datasets.items():
+            result = pipeline.transform(datasets["go_sales"])
+            result = _ensure_pandas(result)
+            self.assertEqual(result.shape, (274, 2))
+            self.assertEqual(result.loc[0, "prod"], 1110, tgt)
+            self.assertEqual(result.loc[0, "line"], "C", tgt)
+            self.assertEqual(result.loc[117, "prod"], 101110, tgt)
+            self.assertEqual(result.loc[117, "line"], "U", tgt)
+            self.assertEqual(result.loc[273, "prod"], 154150, tgt)
+            self.assertEqual(result.loc[273, "line"], "P", tgt)
+
+    def test_dynamic_rename(self):
+        def expr(X):
+            return {("new_" + c): it[c] for c in X.columns}
+
+        pipeline = Scan(table=it.go_products) >> Map(columns=expr)
+        for _tgt, datasets in self.tgt2datasets.items():
+            datasets = datasets["go_sales"]
+            result = pipeline.fit(datasets).transform(datasets)
+            result = _ensure_pandas(result)
+            for c in result.columns:
+                self.assertRegex(c, "new_.*")
+
+    def test_dynamic_rename_lambda(self):
+        pipeline = Scan(table=it.go_products) >> Map(
+            columns=lambda X: {("new_" + c): it[c] for c in X.columns}
+        )
+        for _tgt, datasets in self.tgt2datasets.items():
+            datasets = datasets["go_sales"]
+            result = pipeline.fit(datasets).transform(datasets)
+            result = _ensure_pandas(result)
+            for c in result.columns:
+                self.assertRegex(c, "new_.*")
+
+    def _get_col_schemas(self, cols, X):
+        from lale.datasets import data_schemas
+
+        props = {}
+        s = data_schemas.to_schema(X)
+        if s is not None:
+            inner = s.get("items", {})
+            if inner is not None and isinstance(inner, dict):
+                col_pairs = inner.get("items", [])
+                if col_pairs is not None and isinstance(col_pairs, list):
+                    for cp in col_pairs:
+                        d = cp.get("description", None)
+                        if d is not None and isinstance(d, str):
+                            props[d] = cp
+        for k in cols:
+            if k not in props:
+                props[k] = None
+        return props
+
+    def test_dynamic_schema_num(self):
+        from lale import type_checking
+
+        def expr(X):
+            ret = {}
+            schemas = self._get_col_schemas(X.columns, X)
+            for c, s in schemas.items():
+                if s is None:
+                    ret["unknown_" + c] = it[c]
+                elif type_checking.is_subschema(
+                    s, make_optional_schema({"type": "number"})
+                ):
+                    ret["num_" + c] = it[c]
+                    ret["shifted_" + c] = it[c] + 5
+                else:
+                    ret["other_" + c] = it[c]
+            return ret
+
+        pipeline = Scan(table=it.go_products) >> Map(columns=expr)
+        for _tgt, datasets in self.tgt2datasets.items():
+            datasets = datasets["go_sales"]
+            result = pipeline.fit(datasets).transform(datasets)
+            result = _ensure_pandas(result)
+            self.assertIn("num_Product number", result.columns)
+            self.assertIn("shifted_Product number", result.columns)
+            self.assertIn("other_Product line", result.columns)
+            self.assertEqual(
+                result["num_Product number"][0] + 5, result["shifted_Product number"][0]
+            )
+
+    def test_dynamic_categorical(self):
+        from lale.lib.rasl import categorical
+
+        def expr(X):
+            ret = {}
+            cats = categorical()(X)
+            for c in X.columns:
+                if c in cats:
+                    ret["cat_" + c] = it[c]
+                else:
+                    ret["other_" + c] = it[c]
+            return ret
+
+        pipeline = Scan(table=it.go_products) >> Map(columns=expr)
+        for _tgt, datasets in self.tgt2datasets.items():
+            datasets = datasets["go_sales"]
+            result = pipeline.fit(datasets).transform(datasets)
+            result = _ensure_pandas(result)
+            self.assertIn("cat_Product line", result.columns)
+
+    def test_dynamic_lambda_categorical_drop(self):
+        from lale.lib.rasl import categorical
+
+        pipeline = Scan(table=it.go_products) >> Map(
+            columns=lambda X: {c: it[c] for c in categorical()(_ensure_pandas(X))}
+        )
+        for _tgt, datasets in self.tgt2datasets.items():
+            datasets = datasets["go_sales"]
+            result = pipeline.fit(datasets).transform(datasets)
+            result = _ensure_pandas(result)
+            self.assertEqual(len(result.columns), 1)
+            self.assertIn("Product line", result.columns)
+
+    def test_static_trained(self):
+        op = Map(columns=[it.col])
+        self.assertIsInstance(op, lale.operators.TrainedOperator)
+
+    def test_dynamic_trainable(self):
+        op = Map(columns=lambda X: [it.col])
+        self.assertIsInstance(op, lale.operators.TrainableOperator)
+        self.assertNotIsInstance(op, lale.operators.TrainedOperator)
+
+        pipeline = Scan(table=it.go_products) >> op
+        pd_data = self.tgt2datasets["pandas"]["go_sales"]
+        trained = pipeline.fit(pd_data)
+        trained_map = trained.steps_list()[1]
+        self.assertIsInstance(trained_map, Map)  # type: ignore
+        self.assertIsInstance(trained_map, lale.operators.TrainedOperator)
+
+    def test_project(self):
+        from lale.lib.lale import Project
+
+        pipeline = Scan(table=it.go_products) >> Project(
+            columns=make_optional_schema({"type": "number"})
+        )
+        for _tgt, datasets in self.tgt2datasets.items():
+            datasets = datasets["go_sales"]
+            result = pipeline.fit(datasets).transform(datasets)
+            result = _ensure_pandas(result)
+            self.assertIn("Product number", result.columns)
+            self.assertNotIn("Product line", result.columns)
+
+    def assertSeriesEqual(self, first_series, second_series, msg=None):
+        self.assertIsInstance(first_series, pd.Series, msg)
+        self.assertIsInstance(second_series, pd.Series, msg)
+        self.assertEqual(first_series.shape, second_series.shape, msg)
+        self.assertEqual(list(first_series), list(second_series), msg)
+
+    def test_transform_compare_ops(self):
+        trained = Map(
+            columns={
+                "height<=5": it.height <= 5,
+                "int(height<=5)": astype("int", it.height <= 5),
+                "4==height": 4 == it.height,
+                "height*10==weight": it.height * 10 == it.weight,
+                "height>3&<=5": (it.height > 3) & (it.height <= 5),
+                "height<=3|>5": (it.height <= 3) | (it.height > 5),
+            }
+        )
+        for tgt, datasets in self.tgt2datasets.items():
+            df = datasets["df_num"]
+            transformed_df = trained.transform(df)
+            df, transformed_df = _ensure_pandas(df), _ensure_pandas(transformed_df)
+            self.assertSeriesEqual(transformed_df["height<=5"], df["height"] <= 5, tgt)
+            self.assertSeriesEqual(
+                transformed_df["int(height<=5)"], (df["height"] <= 5).astype(int), tgt
+            )
+            self.assertSeriesEqual(transformed_df["4==height"], 4 == df["height"], tgt)
+            self.assertSeriesEqual(
+                transformed_df["height*10==weight"], df["height"] * 10 == df.weight, tgt
+            )
+            self.assertSeriesEqual(
+                transformed_df["height>3&<=5"], (df["height"] > 3) & (df["height"] <= 5)
+            )
+            self.assertSeriesEqual(
+                transformed_df["height<=3|>5"], (df["height"] <= 3) | (df["height"] > 5)
+            )
+
+    def test_if_then_else_function(self):
+        pretrained = Map(
+            columns={
+                "weight": it["weight"],
+                "w<50": ite(it["weight"] < 50, "<50", ">=50"),
+                "clip_50_inf": ite(it["weight"] < 50, 50, it["weight"]),
+                "clip_50_150": ite(
+                    it["weight"] < 50, 50, ite(it["weight"] > 150, 150, it["weight"])
+                ),
+            }
+        )
+        for tgt, datasets in self.tgt2datasets.items():
+            df = datasets["df_num"]
+            transformed_df = pretrained.transform(df)
+            df, transformed_df = _ensure_pandas(df), _ensure_pandas(transformed_df)
+            self.assertEqual(transformed_df.shape, (5, 4), tgt)
+            self.assertSeriesEqual(df["weight"], transformed_df["weight"], tgt)
+            self.assertEqual(transformed_df["w<50"][0], "<50", tgt)
+            self.assertEqual(transformed_df["w<50"][2], ">=50", tgt)
+            self.assertEqual(transformed_df["clip_50_inf"][0], 50, tgt)
+            self.assertEqual(transformed_df["clip_50_inf"][2], 170, tgt)
+            self.assertEqual(transformed_df["clip_50_150"][0], 50, tgt)
+            self.assertEqual(transformed_df["clip_50_150"][2], 150, tgt)
+
+    def test_spark_null(self):
+        spark_session = (
+            SparkSession.builder.master("local[2]")  # type: ignore
+            .config("spark.driver.memory", "64g")
+            .getOrCreate()
+        )
+        df = spark_session.createDataFrame([(1, None), (2, "li")], ["num", "name"])
+        transformer = Map(columns=[replace(it.name, {None: "ABC"})])
+        transformed_df = transformer.transform(SparkDataFrameWithIndex(df))
+        self.assertEqual(transformed_df.collect()[0][0], "ABC")
 
 
 class TestRelationalOperator(unittest.TestCase):
-    def setUp(self):
-        from sklearn.datasets import load_iris
-        from sklearn.model_selection import train_test_split
+    @classmethod
+    def setUpClass(cls):
+        targets = ["pandas", "spark"]
+        cls.tgt2datasets = {tgt: {} for tgt in targets}
 
-        data = load_iris()
-        X, y = data.data, data.target
-        self.X_train, self.X_test, self.y_train, self.y_test = train_test_split(X, y)
+        def add_df(name, df):
+            cls.tgt2datasets["pandas"][name] = df
+            cls.tgt2datasets["spark"][name] = pandas2spark(df)
+
+        X, y = load_iris(as_frame=True, return_X_y=True)
+        X_train, X_test, y_train, y_test = train_test_split(X, y)
+        add_df("X_train", X_train)
+        add_df("X_test", X_test)
+        add_df("y_train", y_train)
+        add_df("y_test", y_test)
 
     def test_fit_transform(self):
         relational = Relational(
@@ -1920,8 +2228,14 @@ class TestRelationalOperator(unittest.TestCase):
             )
             >> Aggregate(columns=[count(it.Delay)], group_by=it.MessageId)
         )
-        trained_relational = relational.fit(self.X_train, self.y_train)
-        _ = trained_relational.transform(self.X_test)
+        for _tgt, datasets in self.tgt2datasets.items():
+            X_train, X_test, y_train = (
+                datasets["X_train"],
+                datasets["X_test"],
+                datasets["y_train"],
+            )
+            trained_relational = relational.fit(X_train, y_train)
+            _ = trained_relational.transform(X_test)
 
     def test_fit_error(self):
         relational = Relational(
@@ -1934,8 +2248,10 @@ class TestRelationalOperator(unittest.TestCase):
             )
             >> Aggregate(columns=[count(it.Delay)], group_by=it.MessageId)
         )
-        with self.assertRaises(ValueError):
-            _ = relational.fit([self.X_train], self.y_train)
+        for _tgt, datasets in self.tgt2datasets.items():
+            X_train, y_train = datasets["X_train"], datasets["y_train"]
+            with self.assertRaises(ValueError):
+                _ = relational.fit([X_train], y_train)
 
     def test_transform_error(self):
         relational = Relational(
@@ -1948,9 +2264,15 @@ class TestRelationalOperator(unittest.TestCase):
             )
             >> Aggregate(columns=[count(it.Delay)], group_by=it.MessageId)
         )
-        trained_relational = relational.fit(self.X_train, self.y_train)
-        with self.assertRaises(ValueError):
-            _ = trained_relational.transform([self.X_test])
+        for _tgt, datasets in self.tgt2datasets.items():
+            X_train, X_test, y_train = (
+                datasets["X_train"],
+                datasets["X_test"],
+                datasets["y_train"],
+            )
+            trained_relational = relational.fit(X_train, y_train)
+            with self.assertRaises(ValueError):
+                _ = trained_relational.transform([X_test])
 
     def test_fit_transform_in_pipeline(self):
         relational = Relational(
@@ -1964,746 +2286,149 @@ class TestRelationalOperator(unittest.TestCase):
             >> Aggregate(columns=[count(it.Delay)], group_by=it.MessageId)
         )
         pipeline = relational >> LogisticRegression()
-        trained_pipeline = pipeline.fit(self.X_train, self.y_train)
-        _ = trained_pipeline.predict(self.X_test)
-
-
-class TestMapSpark(unittest.TestCase):
-    def setUp(self):
-        if spark_installed:
-            conf = (
-                SparkConf()
-                .setMaster("local[2]")
-                .set("spark.driver.bindAddress", "127.0.0.1")
+        for tgt, datasets in self.tgt2datasets.items():
+            X_train, X_test, y_train = (
+                datasets["X_train"],
+                datasets["X_test"],
+                datasets["y_train"],
             )
-            sc = SparkContext.getOrCreate(conf=conf)
-            self.sqlCtx = SQLContext(sc)
-
-    # The rename column functionality implemented as part of identity function for Map operator
-    # does not support explicit identity calls for now.
-    def test_transform_identity_map(self):
-        d = {
-            "gender": ["m", "f", "m", "m", "f"],
-            "state": ["NY", "NY", "CA", "NY", "CA"],
-            "status": [0, 1, 1, 0, 1],
-        }
-        df = pd.DataFrame(data=d)
-        sdf = self.sqlCtx.createDataFrame(df)
-        trainable = Map(
-            columns={
-                "new_gender": it.gender,
-                "new_status": it["status"],
-            }
-        )
-        trained = trainable.fit(sdf)
-        transformed_df = trained.transform(sdf)
-        self.assertEqual(transformed_df.columns[0], "new_gender")
-        self.assertEqual(transformed_df.columns[2], "new_status")
-        self.assertEqual(len(transformed_df.columns), 3)
-
-    def test_transform_spark_replace_list(self):
-        if spark_installed:
-            d = {
-                "gender": ["m", "f", "m", "m", "f"],
-                "state": ["NY", "NY", "CA", "NY", "CA"],
-                "status": [0, 1, 1, 0, 1],
-            }
-            df = pd.DataFrame(data=d)
-            sdf = self.sqlCtx.createDataFrame(df)
-            gender_map = {"m": "Male", "f": "Female"}
-            state_map = {"NY": "New York", "CA": "California"}
-            trainable = Map(
-                columns=[replace(it.gender, gender_map), replace(it.state, state_map)]
-            )
-            trained = trainable.fit(sdf)
-            transformed_df = trained.transform(sdf)
-            self.assertEqual(
-                (transformed_df.count(), len(transformed_df.columns)), (5, 3)
-            )
-            self.assertEqual(transformed_df.head()[0], "Male")
-            self.assertEqual(transformed_df.head()[1], "New York")
-
-    def test_transform_spark_replace_map(self):
-        if spark_installed:
-            d = {
-                "gender": ["m", "f", "m", "m", "f"],
-                "state": ["NY", "NY", "CA", "NY", "CA"],
-                "status": [0, 1, 1, 0, 1],
-            }
-            df = pd.DataFrame(data=d)
-            sdf = self.sqlCtx.createDataFrame(df)
-            gender_map = {"m": "Male", "f": "Female"}
-            state_map = {"NY": "New York", "CA": "California"}
-            trainable = Map(
-                columns={
-                    "new_gender": replace(it.gender, gender_map),
-                    "new_state": replace(it.state, state_map),
-                }
-            )
-            trained = trainable.fit(sdf)
-            transformed_df = trained.transform(sdf)
-            self.assertEqual(
-                (transformed_df.count(), len(transformed_df.columns)), (5, 3)
-            )
-            self.assertEqual(transformed_df.head()[1], "Male")
-            self.assertEqual(transformed_df.head()[2], "New York")
-
-    def test_transform_dom_list(self):
-        df = pd.DataFrame({"date_column": ["2016-05-28", "2016-06-27", "2016-07-26"]})
-        sdf = self.sqlCtx.createDataFrame(df)
-
-        trainable = Map(columns=[day_of_month(it.date_column)])
-        trained = trainable.fit(sdf)
-        transformed_df = trained.transform(sdf)
-        self.assertEqual(transformed_df.collect()[0]["date_column"], 28)
-        self.assertEqual(transformed_df.collect()[1]["date_column"], 27)
-        self.assertEqual(transformed_df.collect()[2]["date_column"], 26)
-
-    def test_transform_dom_fmt_list(self):
-        df = pd.DataFrame({"date_column": ["28/05/2016", "27/06/2016", "26/07/2016"]})
-        sdf = self.sqlCtx.createDataFrame(df)
-
-        trainable = Map(columns=[day_of_month(it.date_column, "d/M/y")])
-        trained = trainable.fit(sdf)
-        transformed_df = trained.transform(sdf)
-        self.assertEqual(transformed_df.collect()[0]["date_column"], 28)
-        self.assertEqual(transformed_df.collect()[1]["date_column"], 27)
-        self.assertEqual(transformed_df.collect()[2]["date_column"], 26)
-
-    def test_transform_dom_fmt_map(self):
-        df = pd.DataFrame({"date_column": ["2016-05-28", "2016-06-27", "2016-07-26"]})
-        sdf = self.sqlCtx.createDataFrame(df)
-
-        trainable = Map(columns={"dom": day_of_month(it.date_column, "y-M-d")})
-        trained = trainable.fit(sdf)
-        transformed_df = trained.transform(sdf)
-
-        self.assertEqual((transformed_df.count(), len(transformed_df.columns)), (3, 1))
-        self.assertEqual(transformed_df.collect()[0]["dom"], 28)
-        self.assertEqual(transformed_df.collect()[1]["dom"], 27)
-        self.assertEqual(transformed_df.collect()[2]["dom"], 26)
-
-    def test_transform_dow_list(self):
-        df = pd.DataFrame({"date_column": ["2016-05-28", "2016-06-28", "2016-07-28"]})
-        sdf = self.sqlCtx.createDataFrame(df)
-
-        trainable = Map(columns=[day_of_week(it.date_column)])
-        trained = trainable.fit(sdf)
-        transformed_df = trained.transform(sdf)
-        # Note that spark dayofweek outputs are different from pandas
-        self.assertEqual(transformed_df.collect()[0]["date_column"], 7)
-        self.assertEqual(transformed_df.collect()[1]["date_column"], 3)
-        self.assertEqual(transformed_df.collect()[2]["date_column"], 5)
-
-    def test_transform_dow_fmt_list(self):
-        df = pd.DataFrame({"date_column": ["2016-05-28", "2016-06-28", "2016-07-28"]})
-        sdf = self.sqlCtx.createDataFrame(df)
-
-        trainable = Map(columns=[day_of_week(it.date_column, "y-M-d")])
-        trained = trainable.fit(sdf)
-        transformed_df = trained.transform(sdf)
-        self.assertEqual(transformed_df.collect()[0]["date_column"], 7)
-        self.assertEqual(transformed_df.collect()[1]["date_column"], 3)
-        self.assertEqual(transformed_df.collect()[2]["date_column"], 5)
-
-    def test_transform_dow_fmt_map(self):
-        df = pd.DataFrame({"date_column": ["2016-05-28", "2016-06-28", "2016-07-28"]})
-        sdf = self.sqlCtx.createDataFrame(df)
-
-        trainable = Map(columns={"dow": day_of_week(it.date_column, "y-M-d")})
-        trained = trainable.fit(sdf)
-        transformed_df = trained.transform(sdf)
-        self.assertEqual((transformed_df.count(), len(transformed_df.columns)), (3, 1))
-        self.assertEqual(transformed_df.collect()[0]["dow"], 7)
-        self.assertEqual(transformed_df.collect()[1]["dow"], 3)
-        self.assertEqual(transformed_df.collect()[2]["dow"], 5)
-
-    def test_transform_doy_list(self):
-        df = pd.DataFrame({"date_column": ["2016-01-01", "2016-06-28", "2016-07-28"]})
-        sdf = self.sqlCtx.createDataFrame(df)
-
-        trainable = Map(columns=[day_of_year(it.date_column)])
-        trained = trainable.fit(sdf)
-        transformed_df = trained.transform(sdf)
-        self.assertEqual(transformed_df.collect()[0]["date_column"], 1)
-        self.assertEqual(transformed_df.collect()[1]["date_column"], 180)
-        self.assertEqual(transformed_df.collect()[2]["date_column"], 210)
-
-    def test_transform_doy_fmt_list(self):
-        df = pd.DataFrame({"date_column": ["2016-01-01", "2016-06-28", "2016-07-28"]})
-        sdf = self.sqlCtx.createDataFrame(df)
-
-        trainable = Map(columns=[day_of_year(it.date_column, "y-M-d")])
-        trained = trainable.fit(sdf)
-        transformed_df = trained.transform(sdf)
-        self.assertEqual(transformed_df.collect()[0]["date_column"], 1)
-        self.assertEqual(transformed_df.collect()[1]["date_column"], 180)
-        self.assertEqual(transformed_df.collect()[2]["date_column"], 210)
-
-    def test_transform_doy_fmt_map(self):
-        df = pd.DataFrame({"date_column": ["2016-01-01", "2016-06-28", "2016-07-28"]})
-        sdf = self.sqlCtx.createDataFrame(df)
-
-        trainable = Map(columns={"doy": day_of_year(it.date_column, "y-M-d")})
-        trained = trainable.fit(sdf)
-        transformed_df = trained.transform(sdf)
-        self.assertEqual((transformed_df.count(), len(transformed_df.columns)), (3, 1))
-        self.assertEqual(transformed_df.collect()[0]["doy"], 1)
-        self.assertEqual(transformed_df.collect()[1]["doy"], 180)
-        self.assertEqual(transformed_df.collect()[2]["doy"], 210)
-
-    def test_transform_hour_list(self):
-        df = pd.DataFrame(
-            {
-                "date_column": [
-                    "2016-01-01 15:16:45",
-                    "2016-06-28 12:18:51",
-                    "2016-07-28 01:01:01",
-                ]
-            }
-        )
-        sdf = self.sqlCtx.createDataFrame(df)
-
-        trainable = Map(columns=[hour(it.date_column)])
-        trained = trainable.fit(sdf)
-        transformed_df = trained.transform(sdf)
-        self.assertEqual(transformed_df.collect()[0]["date_column"], 15)
-        self.assertEqual(transformed_df.collect()[1]["date_column"], 12)
-        self.assertEqual(transformed_df.collect()[2]["date_column"], 1)
-
-    def test_transform_hour_fmt_list(self):
-        df = pd.DataFrame(
-            {
-                "date_column": [
-                    "2016-01-01 15:16:45",
-                    "2016-06-28 12:18:51",
-                    "2016-07-28 01:01:01",
-                ]
-            }
-        )
-        sdf = self.sqlCtx.createDataFrame(df)
-
-        trainable = Map(columns=[hour(it.date_column, "y-M-d HH:mm:ss")])
-        trained = trainable.fit(sdf)
-        transformed_df = trained.transform(sdf)
-        self.assertEqual(transformed_df.collect()[0]["date_column"], 15)
-        self.assertEqual(transformed_df.collect()[1]["date_column"], 12)
-        self.assertEqual(transformed_df.collect()[2]["date_column"], 1)
-
-    def test_transform_hour_fmt_map(self):
-        df = pd.DataFrame(
-            {
-                "date_column": [
-                    "2016-01-01 15:16:45",
-                    "2016-06-28 12:18:51",
-                    "2016-07-28 01:01:01",
-                ]
-            }
-        )
-        sdf = self.sqlCtx.createDataFrame(df)
-
-        trainable = Map(columns={"hour": hour(it.date_column, "y-M-d HH:mm:ss")})
-        trained = trainable.fit(sdf)
-        transformed_df = trained.transform(sdf)
-        self.assertEqual((transformed_df.count(), len(transformed_df.columns)), (3, 1))
-        self.assertEqual(transformed_df.collect()[0]["hour"], 15)
-        self.assertEqual(transformed_df.collect()[1]["hour"], 12)
-        self.assertEqual(transformed_df.collect()[2]["hour"], 1)
-
-    def test_transform_minute_list(self):
-        df = pd.DataFrame(
-            {
-                "date_column": [
-                    "2016-01-01 15:16:45",
-                    "2016-06-28 12:18:51",
-                    "2016-07-28 01:01:01",
-                ]
-            }
-        )
-        sdf = self.sqlCtx.createDataFrame(df)
-
-        trainable = Map(columns=[minute(it.date_column)])
-        trained = trainable.fit(sdf)
-        transformed_df = trained.transform(sdf)
-        self.assertEqual(transformed_df.collect()[0]["date_column"], 16)
-        self.assertEqual(transformed_df.collect()[1]["date_column"], 18)
-        self.assertEqual(transformed_df.collect()[2]["date_column"], 1)
-
-    def test_transform_minute_fmt_list(self):
-        df = pd.DataFrame(
-            {
-                "date_column": [
-                    "2016-01-01 15:16:45",
-                    "2016-06-28 12:18:51",
-                    "2016-07-28 01:01:01",
-                ]
-            }
-        )
-        sdf = self.sqlCtx.createDataFrame(df)
-        trainable = Map(columns=[minute(it.date_column, "y-M-d HH:mm:ss")])
-        trained = trainable.fit(sdf)
-        transformed_df = trained.transform(sdf)
-        self.assertEqual(transformed_df.collect()[0]["date_column"], 16)
-        self.assertEqual(transformed_df.collect()[1]["date_column"], 18)
-        self.assertEqual(transformed_df.collect()[2]["date_column"], 1)
-
-    def test_transform_minute_fmt_map(self):
-        df = pd.DataFrame(
-            {
-                "date_column": [
-                    "2016-01-01 15:16:45",
-                    "2016-06-28 12:18:51",
-                    "2016-07-28 01:01:01",
-                ]
-            }
-        )
-        sdf = self.sqlCtx.createDataFrame(df)
-
-        trainable = Map(columns={"minute": minute(it.date_column, "y-M-d HH:mm:ss")})
-        trained = trainable.fit(sdf)
-        transformed_df = trained.transform(sdf)
-        self.assertEqual((transformed_df.count(), len(transformed_df.columns)), (3, 1))
-        self.assertEqual(transformed_df.collect()[0]["minute"], 16)
-        self.assertEqual(transformed_df.collect()[1]["minute"], 18)
-        self.assertEqual(transformed_df.collect()[2]["minute"], 1)
-
-    def test_transform_month_list(self):
-        df = pd.DataFrame(
-            {
-                "date_column": [
-                    "2016-01-01 15:16:45",
-                    "2016-06-28 12:18:51",
-                    "2016-07-28 01:01:01",
-                ]
-            }
-        )
-        sdf = self.sqlCtx.createDataFrame(df)
-
-        trainable = Map(columns=[month(it.date_column)])
-        trained = trainable.fit(sdf)
-        transformed_df = trained.transform(sdf)
-        self.assertEqual(transformed_df.collect()[0]["date_column"], 1)
-        self.assertEqual(transformed_df.collect()[1]["date_column"], 6)
-        self.assertEqual(transformed_df.collect()[2]["date_column"], 7)
-
-    def test_transform_month_fmt_list(self):
-        df = pd.DataFrame(
-            {
-                "date_column": [
-                    "2016-01-01 15:16:45",
-                    "2016-06-28 12:18:51",
-                    "2016-07-28 01:01:01",
-                ]
-            }
-        )
-        sdf = self.sqlCtx.createDataFrame(df)
-
-        trainable = Map(columns=[month(it.date_column, "y-M-d HH:mm:ss")])
-        trained = trainable.fit(sdf)
-        transformed_df = trained.transform(sdf)
-        self.assertEqual(transformed_df.collect()[0]["date_column"], 1)
-        self.assertEqual(transformed_df.collect()[1]["date_column"], 6)
-        self.assertEqual(transformed_df.collect()[2]["date_column"], 7)
-
-    def test_transform_month_fmt_map(self):
-        df = pd.DataFrame(
-            {
-                "date_column": [
-                    "2016-01-01 15:16:45",
-                    "2016-06-28 12:18:51",
-                    "2016-07-28 01:01:01",
-                ]
-            }
-        )
-        sdf = self.sqlCtx.createDataFrame(df)
-
-        trainable = Map(columns={"month": month(it.date_column, "y-M-d HH:mm:ss")})
-        trained = trainable.fit(sdf)
-        transformed_df = trained.transform(sdf)
-        self.assertEqual((transformed_df.count(), len(transformed_df.columns)), (3, 1))
-        self.assertEqual(transformed_df.collect()[0]["month"], 1)
-        self.assertEqual(transformed_df.collect()[1]["month"], 6)
-        self.assertEqual(transformed_df.collect()[2]["month"], 7)
-
-    def test_transform_string_indexer_list(self):
-        df = pd.DataFrame({"cat_column": ["a", "b", "b"]})
-        sdf = self.sqlCtx.createDataFrame(df)
-        trainable = Map(columns=[string_indexer(it.cat_column)])
-        trained = trainable.fit(sdf)
-        transformed_df = trained.transform(sdf)
-        self.assertEqual(transformed_df.collect()[0]["cat_column"], 1)
-        self.assertEqual(transformed_df.collect()[1]["cat_column"], 0)
-        self.assertEqual(transformed_df.collect()[2]["cat_column"], 0)
-
-    def test_transform_string_indexer_map(self):
-        df = pd.DataFrame({"cat_column": ["a", "b", "b"]})
-        sdf = self.sqlCtx.createDataFrame(df)
-        trainable = Map(columns={"string_indexed": string_indexer(it.cat_column)})
-        trained = trainable.fit(sdf)
-        transformed_df = trained.transform(sdf)
-        self.assertEqual((transformed_df.count(), len(transformed_df.columns)), (3, 1))
-        self.assertEqual(transformed_df.collect()[0]["string_indexed"], 1)
-        self.assertEqual(transformed_df.collect()[1]["string_indexed"], 0)
-        self.assertEqual(transformed_df.collect()[2]["string_indexed"], 0)
-
-    def test_transform_ratio_map(self):
-        d = {
-            "height": [3, 4, 6, 3, 5],
-            "weight": [30, 50, 170, 40, 130],
-            "status": [0, 1, 1, 0, 1],
-        }
-        df = pd.DataFrame(data=d)
-        sdf = self.sqlCtx.createDataFrame(df)
-        trainable = Map(columns={"ratio_h_w": it.height / it.weight})
-        trained = trainable.fit(sdf)
-        transformed_df = trained.transform(sdf)
-        self.assertEqual((transformed_df.count(), len(transformed_df.columns)), (5, 4))
-        self.assertEqual(transformed_df.collect()[0]["ratio_h_w"], 0.1)
-
-    def test_transform_ratio_map_subscript(self):
-        d = {
-            "height": [3, 4, 6, 3, 5],
-            "weight": [30, 50, 170, 40, 130],
-            "status": [0, 1, 1, 0, 1],
-        }
-        df = pd.DataFrame(data=d)
-        sdf = self.sqlCtx.createDataFrame(df)
-        trainable = Map(columns={"ratio_h_w": it["height"] / it.weight})
-        trained = trainable.fit(sdf)
-        transformed_df = trained.transform(sdf)
-        self.assertEqual((transformed_df.count(), len(transformed_df.columns)), (5, 4))
-        self.assertEqual(transformed_df.collect()[0]["ratio_h_w"], 0.1)
-
-    def test_transform_ratio_map_list(self):
-        d = {
-            "height": [3, 4, 6, 3, 5],
-            "weight": [30, 50, 170, 40, 130],
-            "status": [0, 1, 1, 0, 1],
-        }
-        df = pd.DataFrame(data=d)
-        sdf = self.sqlCtx.createDataFrame(df)
-        trainable = Map(columns=[it.height / it.weight])
-        trained = trainable.fit(sdf)
-        with self.assertRaises(ValueError):
-            _ = trained.transform(df)
-
-    def test_transform_ratio_map_function_name(self):
-        d = {
-            "height": [3, 4, 6, 3, 5],
-            "weight": [30, 50, 170, 40, 130],
-            "status": [0, 1, 1, 0, 1],
-        }
-        df = pd.DataFrame(data=d)
-        sdf = self.sqlCtx.createDataFrame(df)
-        trainable = Map(columns={"ratio_h_w": ratio(it.height, it.weight)})
-        trained = trainable.fit(sdf)
-        transformed_df = trained.transform(sdf)
-        self.assertEqual((transformed_df.count(), len(transformed_df.columns)), (5, 4))
-        self.assertEqual(transformed_df.collect()[0]["ratio_h_w"], 0.1)
-
-    def test_transform_ratio_map_function_name_subscript(self):
-        d = {
-            "height": [3, 4, 6, 3, 5],
-            "weight": [30, 50, 170, 40, 130],
-            "status": [0, 1, 1, 0, 1],
-        }
-        df = pd.DataFrame(data=d)
-        sdf = self.sqlCtx.createDataFrame(df)
-        trainable = Map(columns={"ratio_h_w": ratio(it["height"], it.weight)})
-        trained = trainable.fit(sdf)
-        transformed_df = trained.transform(sdf)
-        self.assertEqual((transformed_df.count(), len(transformed_df.columns)), (5, 4))
-        self.assertEqual(transformed_df.collect()[0]["ratio_h_w"], 0.1)
-
-    def test_transform_subtract_map(self):
-        d = {
-            "height": [3, 4, 6, 3, 5],
-            "weight": [30, 50, 170, 40, 130],
-            "status": [0, 1, 1, 0, 1],
-        }
-        df = pd.DataFrame(data=d)
-        sdf = self.sqlCtx.createDataFrame(df)
-        trainable = Map(columns={"subtraction_h_w": it.height - it.weight})
-        trained = trainable.fit(sdf)
-        transformed_df = trained.transform(sdf)
-        self.assertEqual((transformed_df.count(), len(transformed_df.columns)), (5, 4))
-        self.assertEqual(transformed_df.collect()[0]["subtraction_h_w"], -27)
-
-    def test_transform_subtract_map_subscript(self):
-        d = {
-            "height": [3, 4, 6, 3, 5],
-            "weight": [30, 50, 170, 40, 130],
-            "status": [0, 1, 1, 0, 1],
-        }
-        df = pd.DataFrame(data=d)
-        sdf = self.sqlCtx.createDataFrame(df)
-        trainable = Map(columns={"subtraction_h_w": it["height"] - it.weight})
-        trained = trainable.fit(sdf)
-        transformed_df = trained.transform(sdf)
-        self.assertEqual((transformed_df.count(), len(transformed_df.columns)), (5, 4))
-        self.assertEqual(transformed_df.collect()[0]["subtraction_h_w"], -27)
-
-    def test_transform_subtract_map_list(self):
-        d = {
-            "height": [3, 4, 6, 3, 5],
-            "weight": [30, 50, 170, 40, 130],
-            "status": [0, 1, 1, 0, 1],
-        }
-        df = pd.DataFrame(data=d)
-        sdf = self.sqlCtx.createDataFrame(df)
-        trainable = Map(columns=[it.height - it.weight])
-        trained = trainable.fit(sdf)
-        with self.assertRaises(ValueError):
-            _ = trained.transform(df)
-
-    def test_transform_subtract_map_function_name(self):
-        d = {
-            "height": [3, 4, 6, 3, 5],
-            "weight": [30, 50, 170, 40, 130],
-            "status": [0, 1, 1, 0, 1],
-        }
-        df = pd.DataFrame(data=d)
-        sdf = self.sqlCtx.createDataFrame(df)
-        trainable = Map(columns={"subtraction_h_w": subtract(it.height, it.weight)})
-        trained = trainable.fit(sdf)
-        transformed_df = trained.transform(sdf)
-        self.assertEqual((transformed_df.count(), len(transformed_df.columns)), (5, 4))
-        self.assertEqual(transformed_df.collect()[0]["subtraction_h_w"], -27)
-
-    def test_transform_subtract_map_function_name_subscript(self):
-        d = {
-            "height": [3, 4, 6, 3, 5],
-            "weight": [30, 50, 170, 40, 130],
-            "status": [0, 1, 1, 0, 1],
-        }
-        df = pd.DataFrame(data=d)
-        sdf = self.sqlCtx.createDataFrame(df)
-        trainable = Map(columns={"subtract_h_w": subtract(it["height"], it.weight)})
-        trained = trainable.fit(sdf)
-        transformed_df = trained.transform(sdf)
-        self.assertEqual((transformed_df.count(), len(transformed_df.columns)), (5, 4))
-        self.assertEqual(transformed_df.collect()[0]["subtract_h_w"], -27)
+            if tgt == "pandas":
+                trained_pipeline = pipeline.fit(X_train, y_train)
+                _ = trained_pipeline.predict(X_test)
+            elif tgt == "spark":
+                # LogisticRegression is not implemented on Spark
+                pass
+            else:
+                assert False
 
 
 class TestOrderBy(unittest.TestCase):
-    def setUp(self):
-        self.d = {
-            "gender": ["m", "f", "m", "m", "f"],
-            "state": ["NY", "NY", "CA", "NY", "CA"],
-            "status": [0, 1, 1, 0, 1],
-        }
+    @classmethod
+    def setUpClass(cls):
+        targets = ["pandas", "spark"]
+        cls.tgt2datasets = {tgt: {} for tgt in targets}
 
-    def test_order_attr1(self):
-        df = pd.DataFrame(data=self.d)
-        trainable = OrderBy(by=it.gender)
-        trained = trainable.fit(df)
-        transformed_df = trained.transform(df)
+        def add_df(name, df):
+            cls.tgt2datasets["pandas"][name] = df
+            cls.tgt2datasets["spark"][name] = pandas2spark(df)
 
-        self.assertTrue((transformed_df["gender"]).is_monotonic_increasing)
-
-    def test_order_attr1_asc(self):
-        df = pd.DataFrame(data=self.d)
-        trainable = OrderBy(by=asc(it.gender))
-        trained = trainable.fit(df)
-        transformed_df = trained.transform(df)
-
-        self.assertTrue((transformed_df["gender"]).is_monotonic_increasing)
-
-    def test_order_attr1_desc(self):
-        df = pd.DataFrame(data=self.d)
-        trainable = OrderBy(by=desc(it.gender))
-        trained = trainable.fit(df)
-        transformed_df = trained.transform(df)
-
-        self.assertTrue((transformed_df["gender"]).is_monotonic_decreasing)
-
-    def test_order_str1_desc(self):
-        df = pd.DataFrame(data=self.d)
-        trainable = OrderBy(by=desc("gender"))
-        trained = trainable.fit(df)
-        transformed_df = trained.transform(df)
-
-        self.assertTrue((transformed_df["gender"]).is_monotonic_decreasing)
-
-    def test_order_multiple(self):
-        df = pd.DataFrame(data=self.d)
-        trainable = OrderBy(by=[it.gender, desc(it.status)])
-        trained = trainable.fit(df)
-        transformed_df = trained.transform(df)
-        expected_result = pd.DataFrame(
-            data={
-                "gender": ["f", "f", "m", "m", "m"],
-                "state": ["NY", "CA", "CA", "NY", "NY"],
-                "status": [1, 1, 1, 0, 0],
-            }
-        )
-        self.assertEqual(list(transformed_df.index), [1, 4, 2, 0, 3])
-        self.assertTrue((transformed_df["gender"]).is_monotonic_increasing)
-        self.assertTrue(transformed_df.reset_index(drop=True).equals(expected_result))
-
-
-class TestOrderBySpark(unittest.TestCase):
-    def setUp(self):
-        if spark_installed:
-            conf = (
-                SparkConf()
-                .setMaster("local[2]")
-                .set("spark.driver.bindAddress", "127.0.0.1")
-            )
-            sc = SparkContext.getOrCreate(conf=conf)
-            self.sqlCtx = SQLContext(sc)
-            d = {
+        df = pd.DataFrame(
+            {
                 "gender": ["m", "f", "m", "m", "f"],
                 "state": ["NY", "NY", "CA", "NY", "CA"],
                 "status": [0, 1, 1, 0, 1],
             }
-            df = pd.DataFrame(data=d)
-            self.sdf = self.sqlCtx.createDataFrame(df)
-
-    # The rename column functionality implemented as part of identity function for Map operator
-    # does not support explicit identity calls for now.
-    def test_str1(self):
-        trainable = OrderBy(by="gender")
-        trained = trainable.fit(self.sdf)
-        transformed_df = trained.transform(self.sdf)
-        cgender = pd.Series(
-            transformed_df.select("gender").rdd.flatMap(lambda x: x).collect()
         )
-
-        self.assertTrue(cgender.is_monotonic_increasing)
+        add_df("df", df)
 
     def test_order_attr1(self):
-        trainable = OrderBy(by=it.gender)
-        trained = trainable.fit(self.sdf)
-        transformed_df = trained.transform(self.sdf)
-
-        cgender = pd.Series(
-            transformed_df.select("gender").rdd.flatMap(lambda x: x).collect()
-        )
-
-        self.assertTrue(cgender.is_monotonic_increasing)
+        trainable = OrderBy(by=it.status)
+        for tgt, datasets in self.tgt2datasets.items():
+            df = datasets["df"]
+            trained = trainable.fit(df)
+            transformed_df = trained.transform(df)
+            if tgt == "spark":
+                self.assertEqual(get_index_name(transformed_df), get_index_name(df))
+            transformed_df = _ensure_pandas(transformed_df)
+            self.assertTrue((transformed_df["status"]).is_monotonic_increasing)
 
     def test_order_attr1_asc(self):
-        trainable = OrderBy(by=asc(it.gender))
-        trained = trainable.fit(self.sdf)
-        transformed_df = trained.transform(self.sdf)
-
-        cgender = pd.Series(
-            transformed_df.select("gender").rdd.flatMap(lambda x: x).collect()
-        )
-
-        self.assertTrue(cgender.is_monotonic_increasing)
+        trainable = OrderBy(by=asc(it.status))
+        for tgt, datasets in self.tgt2datasets.items():
+            df = datasets["df"]
+            trained = trainable.fit(df)
+            transformed_df = trained.transform(df)
+            if tgt == "spark":
+                self.assertEqual(get_index_name(transformed_df), get_index_name(df))
+            transformed_df = _ensure_pandas(transformed_df)
+            self.assertTrue((transformed_df["status"]).is_monotonic_increasing)
 
     def test_order_attr1_desc(self):
-        trainable = OrderBy(by=desc(it.gender))
-        trained = trainable.fit(self.sdf)
-        transformed_df = trained.transform(self.sdf)
-
-        cgender = pd.Series(
-            transformed_df.select("gender").rdd.flatMap(lambda x: x).collect()
-        )
-
-        self.assertTrue(cgender.is_monotonic_decreasing)
+        trainable = OrderBy(by=desc(it.status))
+        for _tgt, datasets in self.tgt2datasets.items():
+            df = datasets["df"]
+            trained = trainable.fit(df)
+            transformed_df = trained.transform(df)
+            transformed_df = _ensure_pandas(transformed_df)
+            self.assertTrue((transformed_df["status"]).is_monotonic_decreasing)
 
     def test_order_str1_desc(self):
         trainable = OrderBy(by=desc("gender"))
-        trained = trainable.fit(self.sdf)
-        transformed_df = trained.transform(self.sdf)
-
-        cgender = pd.Series(
-            transformed_df.select("gender").rdd.flatMap(lambda x: x).collect()
-        )
-
-        self.assertTrue(cgender.is_monotonic_decreasing)
+        for _tgt, datasets in self.tgt2datasets.items():
+            df = datasets["df"]
+            trained = trainable.fit(df)
+            transformed_df = trained.transform(df)
+            transformed_df = _ensure_pandas(transformed_df)
+            self.assertTrue((transformed_df["gender"]).is_monotonic_decreasing)
 
     def test_order_multiple(self):
         trainable = OrderBy(by=[it.gender, desc(it.status)])
-        trained = trainable.fit(self.sdf)
-        transformed_df = trained.transform(self.sdf)
-        expected_result = pd.DataFrame(
-            data={
-                "gender": ["f", "f", "m", "m", "m"],
-                "state": ["NY", "CA", "CA", "NY", "NY"],
-                "status": [1, 1, 1, 0, 0],
-            }
-        )
-        cgender = pd.Series(
-            transformed_df.select("gender").rdd.flatMap(lambda x: x).collect()
-        )
-        self.assertTrue(cgender.is_monotonic_increasing)
-        self.assertTrue(
-            transformed_df.toPandas().reset_index(drop=True).equals(expected_result)
-        )
+        for _tgt, datasets in self.tgt2datasets.items():
+            df = datasets["df"]
+            trained = trainable.fit(df)
+            transformed_df = trained.transform(df)
+            transformed_df = _ensure_pandas(transformed_df)
+            expected_result = pd.DataFrame(
+                data={
+                    "gender": ["f", "f", "m", "m", "m"],
+                    "state": ["NY", "CA", "CA", "NY", "NY"],
+                    "status": [1, 1, 1, 0, 0],
+                }
+            )
+            self.assertEqual(list(transformed_df.index), [1, 4, 2, 0, 3])
+            self.assertTrue((transformed_df["gender"]).is_monotonic_increasing)
+            self.assertTrue(
+                transformed_df.reset_index(drop=True).equals(expected_result)
+            )
+
+    def test_str1(self):
+        trainable = OrderBy(by="gender")
+        for _tgt, datasets in self.tgt2datasets.items():
+            df = datasets["df"]
+            trained = trainable.fit(df)
+            transformed_df = trained.transform(df)
+            transformed_df = _ensure_pandas(transformed_df)
+            self.assertTrue((transformed_df["gender"]).is_monotonic_increasing)
 
 
 class TestSplitXy(unittest.TestCase):
-    def setUp(self):
+    @classmethod
+    def setUp(cls):  # pylint:disable=arguments-differ
         data = load_iris()
         X, y = data.data, data.target
-        self.X_train, self.X_test, self.y_train, self.y_test = train_test_split(
+        X_train, _X_test, y_train, _y_test = train_test_split(
             pd.DataFrame(X), pd.DataFrame(y)
         )
-        self.combined_df = pd.concat([self.X_train, self.y_train], axis=1)
-        self.combined_df.columns = [
+        combined_df = pd.concat([X_train, y_train], axis=1)
+        combined_df.columns = [
             "sepal_length",
             "sepal_width",
             "petal_length",
             "petal_width",
             "class",
         ]
+        spark_df = pandas2spark(combined_df)
+        cls.tgt2datasets = {
+            "pandas": combined_df,
+            "spark": spark_df,
+        }
 
     def test_split_transform(self):
-        pipeline = PCA()
-        trainable = SplitXy(operator=pipeline, label_name="class")
-        trained = trainable.fit(self.combined_df)
-        _ = trained.transform(self.combined_df)
+        for _, df in self.tgt2datasets.items():
+            trainable = SplitXy(label_name="class") >> Convert(astype="pandas") >> PCA()
+            trained = trainable.fit(df)
+            _ = trained.transform(df)
 
     def test_split_predict(self):
-        pipeline = PCA() >> LogisticRegression(random_state=42)
-        trainable = SplitXy(operator=pipeline, label_name="class")
-        trained = trainable.fit(self.combined_df)
-        _ = trained.predict(self.X_test)
-
-
-@unittest.skip(
-    "skipping because we don't have any estimators that handle a Spark dataframe."
-)
-class TestSplitXySpark(unittest.TestCase):
-    def setUp(self):
-        if spark_installed:
-            conf = (
-                SparkConf()
-                .setMaster("local[2]")
-                .set("spark.driver.bindAddress", "127.0.0.1")
+        for _, df in self.tgt2datasets.items():
+            trainable = (
+                SplitXy(label_name="class")
+                >> Convert(astype="pandas")
+                >> PCA()
+                >> LogisticRegression(random_state=42)
             )
-            sc = SparkContext.getOrCreate(conf=conf)
-            self.sqlCtx = SQLContext(sc)
-            data = load_iris()
-            X, y = data.data, data.target
-            self.X_train, self.X_test, self.y_train, self.y_test = train_test_split(
-                pd.DataFrame(X), pd.DataFrame(y)
-            )
-            self.combined_df = pd.concat([self.X_train, self.y_train], axis=1)
-            self.combined_df.columns = [
-                "sepal_length",
-                "sepal_width",
-                "petal_length",
-                "petal_width",
-                "class",
-            ]
-            self.combined_df_spark = self.sqlCtx.createDataFrame(self.combined_df)
-
-    def test_split_spark_transform(self):
-        pipeline = PCA()
-        trainable = SplitXy(operator=pipeline, label_name="class")
-        trained = trainable.fit(self.combined_df_spark)
-        _ = trained.transform(self.combined_df_spark)
-
-    def test_split_spark_predict(self):
-        pipeline = PCA() >> LogisticRegression(random_state=42)
-        trainable = SplitXy(operator=pipeline, label_name="class")
-        trained = trainable.fit(self.combined_df)
-        _ = trained.predict(pd.DataFrame(self.X_test))
+            trained = trainable.fit(df)
+            _ = trained.predict(df)
 
 
 class TestTrainTestSplit(unittest.TestCase):
@@ -2732,7 +2457,7 @@ class TestTrainTestSplit(unittest.TestCase):
         self.assertEqual(len(test_y), 54)
 
     def test_split_pandas_1(self):
-        train, test, train_y, test_y = multitable_train_test_split(
+        _train, test, _train_y, test_y = multitable_train_test_split(
             self.go_sales,
             main_table_name="go_products",
             label_column_name="Product number",
@@ -2763,3 +2488,117 @@ class TestTrainTestSplit(unittest.TestCase):
                 main_table_df = df
         self.assertEqual(main_table_df.count(), 54)
         self.assertEqual(test_y.count(), 54)
+
+
+class TestConvert(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.targets: List[datatype_param_type] = ["pandas", "spark"]
+        cls.tgt2datasets = {tgt: fetch_go_sales_dataset(tgt) for tgt in cls.targets}
+
+    def _check(self, src, dst, tgt):
+        self.assertEqual(get_table_name(src), get_table_name(dst), tgt)
+        self.assertEqual(list(get_columns(src)), list(get_columns(dst)), tgt)
+        pd_src = _ensure_pandas(src)
+        pd_dst = _ensure_pandas(dst)
+        self.assertEqual(pd_src.shape, pd_dst.shape, tgt)
+
+    def test_to_pandas(self):
+        for tgt, datasets in self.tgt2datasets.items():
+            transformer = Convert(astype="pandas")
+            go_products = datasets[3]
+            self.assertEqual(get_table_name(go_products), "go_products", tgt)
+            transformed_df = transformer.transform(go_products)
+            self.assertTrue(_is_pandas_df(transformed_df), tgt)
+            self._check(go_products, transformed_df, tgt)
+
+    def test_to_spark(self):
+        for tgt, datasets in self.tgt2datasets.items():
+            transformer = Convert(astype="spark")
+            go_products = datasets[3]
+            self.assertEqual(get_table_name(go_products), "go_products", tgt)
+            transformed_df = transformer.transform(go_products)
+            self.assertTrue(_is_spark_df(transformed_df), tgt)
+            self._check(go_products, transformed_df, tgt)
+
+    def test_to_spark_with_index(self):
+        for tgt, datasets in self.tgt2datasets.items():
+            transformer = Convert(astype="spark")
+            go_products = datasets[3]
+            self.assertEqual(get_table_name(go_products), "go_products", tgt)
+            transformed_df = transformer.transform(go_products)
+            self.assertTrue(_is_spark_df(transformed_df), tgt)
+            self._check(go_products, transformed_df, tgt)
+
+    def test_from_list(self):
+        df = [[0.1, 0.2, 0.3], [4, 5, 6]]
+        pd_src = pd.DataFrame(df)
+        for tgt in self.targets:
+            transformer = Convert(astype=tgt)
+            tranformed_df = transformer.transform(df)
+            pd_dst = _ensure_pandas(tranformed_df)
+            self.assertEqual(pd_src.shape, pd_dst.shape, tgt)
+            for row_idx in range(pd_src.shape[0]):
+                for col_idx in range(pd_src.shape[1]):
+                    self.assertAlmostEqual(
+                        pd_src.iloc[row_idx, col_idx],
+                        pd_dst.iloc[row_idx, col_idx],
+                        msg=(row_idx, col_idx, tgt),
+                    )
+
+
+class TestSortIndex(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        targets = ["pandas", "spark"]
+        cls.tgt2datasets = {tgt: {} for tgt in targets}
+
+        def add_df(name, df):
+            cls.tgt2datasets["pandas"][name] = df
+            cls.tgt2datasets["spark"][name] = pandas2spark(df)
+
+        df = pd.DataFrame(
+            {
+                "gender": ["m", "f", "m", "m", "f"],
+                "state": ["NY", "NY", "CA", "NY", "CA"],
+                "status": [0, 1, 1, 0, 1],
+                "id": [9, 20, 35, 7, 100],
+            }
+        )
+        df = df.set_index("id")
+        add_df("df", df)
+        cls.y = pd.Series([1, 1, 1, 0, 0])
+
+    def test_sort_asc(self):
+        trainable = SortIndex()
+        for tgt, datasets in self.tgt2datasets.items():
+            df = datasets["df"]
+            trained = trainable.fit(df)
+            transformed_df = trained.transform(df)
+            if tgt == "spark":
+                self.assertEqual(get_index_name(transformed_df), get_index_name(df))
+            transformed_df = _ensure_pandas(transformed_df)
+            self.assertTrue((transformed_df["status"]).is_monotonic_increasing)
+            transformed_X, transformed_y = trained.transform_X_y(df, self.y)
+            if tgt == "spark":
+                self.assertEqual(get_index_name(transformed_X), get_index_name(df))
+            transformed_X = _ensure_pandas(transformed_X)
+            self.assertTrue((transformed_X["status"]).is_monotonic_increasing)
+            self.assertTrue((transformed_y).is_monotonic_decreasing)
+
+    def test_sort_desc(self):
+        trainable = SortIndex(ascending=False)
+        for tgt, datasets in self.tgt2datasets.items():
+            df = datasets["df"]
+            trained = trainable.fit(df)
+            transformed_df = trained.transform(df)
+            if tgt == "spark":
+                self.assertEqual(get_index_name(transformed_df), get_index_name(df))
+            transformed_df = _ensure_pandas(transformed_df)
+            self.assertTrue((transformed_df["status"]).is_monotonic_decreasing)
+            transformed_X, transformed_y = trained.transform_X_y(df, self.y)
+            if tgt == "spark":
+                self.assertEqual(get_index_name(transformed_X), get_index_name(df))
+            transformed_X = _ensure_pandas(transformed_X)
+            self.assertTrue((transformed_X["status"]).is_monotonic_decreasing)
+            self.assertTrue((transformed_y).is_monotonic_increasing)

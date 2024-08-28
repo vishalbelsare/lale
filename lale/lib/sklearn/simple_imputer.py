@@ -1,4 +1,4 @@
-# Copyright 2019 IBM Corporation
+# Copyright 2019-2023 IBM Corporation
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -13,42 +13,48 @@
 # limitations under the License.
 
 
+from typing import List, Optional
+
 import numpy as np
 import pandas as pd
+import sklearn
 import sklearn.impute
+from packaging import version
 
 import lale.docstrings
 import lale.operators
 
 
 class _SimpleImputerImpl:
-    def __init__(
-        self,
-        missing_values=None,
-        strategy="mean",
-        fill_value=None,
-        verbose=0,
-        copy=True,
-        add_indicator=False,
-    ):
-        self._hyperparams = {
-            "missing_values": missing_values,
-            "strategy": strategy,
-            "fill_value": fill_value,
-            "verbose": verbose,
-            "copy": copy,
-            "add_indicator": add_indicator,
-        }
-        self._wrapped_model = sklearn.impute.SimpleImputer(**self._hyperparams)
+    def __init__(self, **hyperparams):
+        self._wrapped_model = sklearn.impute.SimpleImputer(**hyperparams)
+        self._out_names: Optional[List[str]] = None
+
+    def _find_out_names(self, X):
+        if self._out_names is None and isinstance(X, pd.DataFrame):
+            self._out_names = [
+                c for i, c in enumerate(X.columns) if i not in self._all_missing
+            ]
 
     def fit(self, X, y=None):
         self._wrapped_model.fit(X, y)
+        missing_mask = sklearn.impute.MissingIndicator(
+            missing_values=self._wrapped_model.missing_values,
+            features="all",
+        ).fit_transform(X, y)
+        self._all_missing = [i for i in range(X.shape[1]) if np.all(missing_mask[:, i])]
+        self._find_out_names(X)
         return self
 
     def transform(self, X):
         result = self._wrapped_model.transform(X)
+        self._find_out_names(X)
         if isinstance(X, pd.DataFrame):
-            result = pd.DataFrame(data=result, index=X.index, columns=X.columns)
+            assert self._out_names is not None
+            assert result.shape[1] == len(self._out_names)
+            result = pd.DataFrame(data=result, index=X.index, columns=self._out_names)
+        elif self._out_names is not None:
+            result = pd.DataFrame(data=result, columns=self._out_names)
         return result
 
     def transform_schema(self, s_X):
@@ -110,17 +116,7 @@ _hyperparams_schema = {
                     "description": "If True, a MissingIndicator transform will stack onto output of the imputer’s transform.",
                 },
             },
-        },
-        {
-            "description": "Imputation not possible when missing_values == 0 and input is sparse. Provide a dense array instead.",
-            "anyOf": [
-                {"type": "object", "laleNot": "X/isSparse"},
-                {
-                    "type": "object",
-                    "properties": {"missing_values": {"not": {"enum": [0]}}},
-                },
-            ],
-        },
+        }
     ],
 }
 
@@ -183,7 +179,52 @@ _combined_schemas = {
     },
 }
 
-
 SimpleImputer = lale.operators.make_operator(_SimpleImputerImpl, _combined_schemas)
+
+if lale.operators.sklearn_version < version.Version("1.4"):
+    # this constraint is removed in scikit-learn version 1.4
+    SimpleImputer = SimpleImputer.customize_schema(
+        constraint={
+            "description": "Imputation not possible when missing_values == 0 and input is sparse. Provide a dense array instead.",
+            "anyOf": [
+                {"type": "object", "laleNot": "X/isSparse"},
+                {
+                    "type": "object",
+                    "properties": {"missing_values": {"not": {"enum": [0]}}},
+                },
+            ],
+        },
+        set_as_available=True,
+    )
+
+if lale.operators.sklearn_version >= version.Version("1.1"):
+    # old: https://scikit-learn.org/1.0/modules/generated/sklearn.impute.SimpleImputer.html#sklearn.impute.SimpleImputer
+    # new: https://scikit-learn.org/1.1/modules/generated/sklearn.impute.SimpleImputer.html#sklearn.impute.SimpleImputer
+    SimpleImputer = SimpleImputer.customize_schema(
+        verbose={
+            "anyOf": [{"type": "integer"}, {"enum": ["deprecated"]}],
+            "default": "deprecated",
+            "description": "Controls the verbosity of the imputer. Deprecated since version 1.1: The ‘verbose’ parameter was deprecated in version 1.1 and will be removed in 1.3. A warning will always be raised upon the removal of empty columns in the future version.",
+        }
+    )
+
+if lale.operators.sklearn_version >= version.Version("1.2"):
+    # old: https://scikit-learn.org/1.1/modules/generated/sklearn.impute.SimpleImputer.html#sklearn.impute.SimpleImputer
+    # new: https://scikit-learn.org/1.2/modules/generated/sklearn.impute.SimpleImputer.html#sklearn.impute.SimpleImputer
+    SimpleImputer = SimpleImputer.customize_schema(
+        keep_empty_features={
+            "type": "boolean",
+            "default": False,
+            "description": """If True, features that consist exclusively of missing values when fit is called
+are returned in results when transform is called. The imputed value is always 0 except when strategy="constant"
+in which case fill_value will be used instead.""",
+        },
+        set_as_available=True,
+    )
+
+if lale.operators.sklearn_version >= version.Version("1.3"):
+    # old: https://scikit-learn.org/1.0/modules/generated/sklearn.impute.SimpleImputer.html#sklearn.impute.SimpleImputer
+    # new: https://scikit-learn.org/1.1/modules/generated/sklearn.impute.SimpleImputer.html#sklearn.impute.SimpleImputer
+    SimpleImputer = SimpleImputer.customize_schema(verbose=None, set_as_available=True)
 
 lale.docstrings.set_docstrings(SimpleImputer)

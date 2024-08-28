@@ -1,4 +1,4 @@
-# Copyright 2019 IBM Corporation
+# Copyright 2019-2022 IBM Corporation
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -12,11 +12,18 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import sklearn
+from packaging import version
 from sklearn.linear_model import SGDClassifier as SKLModel
 
 import lale.docstrings
 import lale.operators
+
+from ._common_schemas import (
+    schema_1D_cats,
+    schema_2D_numbers,
+    schema_sample_weight,
+    schema_X_numbers,
+)
 
 _hyperparams_schema = {
     "description": "inherited docstring for SGDClassifier Linear classifiers (SVM, logistic regression, a.o.) with SGD training.",
@@ -117,7 +124,6 @@ _hyperparams_schema = {
                             "type": "number",
                             "minimumForOptimizer": 1e-08,
                             "maximumForOptimizer": 0.01,
-                            "distribution": "loguniform",
                         },
                         {"enum": [None]},
                     ],
@@ -245,22 +251,8 @@ _input_fit_schema = {
     "required": ["X", "y"],
     "type": "object",
     "properties": {
-        "X": {
-            "type": "array",
-            "items": {
-                "type": "array",
-                "items": {"type": "number"},
-            },
-            "description": "Training data",
-        },
-        "y": {
-            "anyOf": [
-                {"type": "array", "items": {"type": "number"}},
-                {"type": "array", "items": {"type": "string"}},
-                {"type": "array", "items": {"type": "boolean"}},
-            ],
-            "description": "Target values",
-        },
+        "X": schema_2D_numbers,
+        "y": schema_1D_cats,
         "coef_init": {
             "type": "array",
             "items": {
@@ -274,74 +266,27 @@ _input_fit_schema = {
             "items": {"type": "number"},
             "description": "The initial intercept to warm-start the optimization.",
         },
-        "sample_weight": {
-            "anyOf": [
-                {
-                    "type": "array",
-                    "items": {"type": "number"},
-                },
-                {"enum": [None]},
-            ],
-            "default": None,
-            "description": "Weights applied to individual samples.",
-        },
+        "sample_weight": schema_sample_weight,
     },
-}
-_input_predict_schema = {
-    "description": "Predict class labels for samples in X.",
-    "type": "object",
-    "properties": {
-        "X": {
-            "type": "array",
-            "items": {
-                "type": "array",
-                "items": {"type": "number"},
-            },
-            "description": "Training data",
-        },
-    },
-}
-_output_predict_schema = {
-    "description": "Predicted class label per sample.",
-    "anyOf": [
-        {"type": "array", "items": {"type": "number"}},
-        {"type": "array", "items": {"type": "string"}},
-        {"type": "array", "items": {"type": "boolean"}},
-    ],
 }
 
-_input_predict_proba_schema = {
-    "description": "Probability estimates.",
+_input_partial_fit_schema = {
     "type": "object",
+    "required": ["X", "y"],
     "properties": {
-        "X": {
-            "type": "array",
-            "items": {
-                "type": "array",
-                "items": {"type": "number"},
-            },
-        },
+        "X": schema_2D_numbers,
+        "y": schema_1D_cats,
+        "classes": schema_1D_cats,
+        "sample_weight": schema_sample_weight,
     },
 }
+
 _output_predict_proba_schema = {
     "description": "Returns the probability of the sample for each class in the model,",
     "type": "array",
     "items": {
         "type": "array",
         "items": {"type": "number"},
-    },
-}
-
-_input_decision_function_schema = {
-    "type": "object",
-    "required": ["X"],
-    "additionalProperties": False,
-    "properties": {
-        "X": {
-            "description": "Features; the outer array is over samples.",
-            "type": "array",
-            "items": {"type": "array", "items": {"type": "number"}},
-        }
     },
 }
 
@@ -374,11 +319,12 @@ _combined_schemas = {
     "properties": {
         "hyperparams": _hyperparams_schema,
         "input_fit": _input_fit_schema,
-        "input_predict": _input_predict_schema,
-        "output_predict": _output_predict_schema,
-        "input_predict_proba": _input_predict_proba_schema,
+        "input_partial_fit": _input_partial_fit_schema,
+        "input_predict": schema_X_numbers,
+        "output_predict": schema_1D_cats,
+        "input_predict_proba": schema_X_numbers,
         "output_predict_proba": _output_predict_proba_schema,
-        "input_decision_function": _input_decision_function_schema,
+        "input_decision_function": schema_X_numbers,
         "output_decision_function": _output_decision_function_schema,
     },
 }
@@ -386,7 +332,7 @@ _combined_schemas = {
 
 SGDClassifier = lale.operators.make_operator(SKLModel, _combined_schemas)
 
-if sklearn.__version__ >= "1.0":
+if lale.operators.sklearn_version >= version.Version("1.0"):
     # old: https://scikit-learn.org/0.24/modules/generated/sklearn.linear_model.SGDClassifer.html
     # new: https://scikit-learn.org/1.0/modules/generated/sklearn.linear_model.SGDClassifier.html
     SGDClassifier = SGDClassifier.customize_schema(
@@ -421,4 +367,72 @@ More details about the losses formulas can be found in the scikit-learn User Gui
         set_as_available=True,
     )
 
+if lale.operators.sklearn_version >= version.Version("1.1"):
+    SGDClassifier = SGDClassifier.customize_schema(
+        loss={
+            "description": """The loss function to be used. Defaults to ‘hinge’, which gives a linear SVM.
+The possible options are ‘hinge’, ‘log’, ‘modified_huber’, ‘squared_hinge’, ‘perceptron’,
+or a regression loss: ‘squared_error’, ‘huber’, ‘epsilon_insensitive’, or ‘squared_epsilon_insensitive’.
+The ‘log_loss’ loss gives logistic regression, a probabilistic classifier.
+‘modified_huber’ is another smooth loss that brings tolerance to outliers as well as probability estimates.
+‘squared_hinge’ is like hinge but is quadratically penalized.
+‘perceptron’ is the linear loss used by the perceptron algorithm.
+The other losses are designed for regression but can be useful in classification as well; see SGDRegressor for a description.
+More details about the losses formulas can be found in the scikit-learn User Guide.""",
+            "anyOf": [
+                {
+                    "enum": [
+                        "hinge",
+                        "log",
+                        "log_loss",
+                        "modified_huber",
+                        "squared_hinge",
+                        "perceptron",
+                        "squared_error",
+                        "huber",
+                        "epsilon_insensitive",
+                        "squared_epsilon_insensitive",
+                    ],
+                },
+                {"enum": ["squared_loss"], "forOptimizer": False},
+            ],
+            "default": "hinge",
+        },
+        set_as_available=True,
+    )
+
+if lale.operators.sklearn_version >= version.Version("1.3"):
+    # old: https://scikit-learn.org/0.24/modules/generated/sklearn.linear_model.SGDClassifer.html
+    # new: https://scikit-learn.org/1.0/modules/generated/sklearn.linear_model.SGDClassifier.html
+    SGDClassifier = SGDClassifier.customize_schema(
+        loss={
+            "description": """The loss function to be used. Defaults to ‘hinge’, which gives a linear SVM.
+The possible options are ‘hinge’, ‘log’, ‘modified_huber’, ‘squared_hinge’, ‘perceptron’,
+or a regression loss: ‘squared_error’, ‘huber’, ‘epsilon_insensitive’, or ‘squared_epsilon_insensitive’.
+The ‘log_loss’ loss gives logistic regression, a probabilistic classifier.
+‘modified_huber’ is another smooth loss that brings tolerance to outliers as well as probability estimates.
+‘squared_hinge’ is like hinge but is quadratically penalized.
+‘perceptron’ is the linear loss used by the perceptron algorithm.
+The other losses are designed for regression but can be useful in classification as well; see SGDRegressor for a description.
+More details about the losses formulas can be found in the scikit-learn User Guide.""",
+            "anyOf": [
+                {
+                    "enum": [
+                        "hinge",
+                        "log_loss",
+                        "modified_huber",
+                        "squared_hinge",
+                        "perceptron",
+                        "squared_error",
+                        "huber",
+                        "epsilon_insensitive",
+                        "squared_epsilon_insensitive",
+                    ],
+                },
+                {"enum": ["squared_loss"], "forOptimizer": False},
+            ],
+            "default": "hinge",
+        },
+        set_as_available=True,
+    )
 lale.docstrings.set_docstrings(SGDClassifier)

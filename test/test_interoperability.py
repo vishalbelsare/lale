@@ -1,4 +1,4 @@
-# Copyright 2019 IBM Corporation
+# Copyright 2019-2023 IBM Corporation
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -17,9 +17,11 @@ from test import EnableSchemaValidation
 
 from jsonschema.exceptions import ValidationError
 
+import lale.datasets.openml
+import lale.lib.aif360
 import lale.type_checking
-from lale.lib.lale import ConcatFeatures, NoOp
-from lale.lib.sklearn import PCA, LogisticRegression, Nystroem
+from lale.lib.lale import ConcatFeatures, NoOp, Project
+from lale.lib.sklearn import PCA, LogisticRegression, Nystroem, OrdinalEncoder
 
 
 class TestResamplers(unittest.TestCase):
@@ -44,8 +46,6 @@ class TestResamplers(unittest.TestCase):
 
 def create_function_test_resampler(res_name):
     def test_resampler(self):
-        from lale.lib.sklearn import PCA, LogisticRegression
-
         X_train, y_train = self.X_train, self.y_train
         X_test = self.X_test
         import importlib
@@ -120,7 +120,7 @@ def create_function_test_resampler(res_name):
         # test_to_json
         pipeline1.to_json()
 
-    test_resampler.__name__ = "test_{0}".format(res_name.split(".")[-1])
+    test_resampler.__name__ = f"test_{res_name.split('.')[-1]}"
     return test_resampler
 
 
@@ -131,6 +131,7 @@ resamplers = [
     "lale.lib.imblearn.BorderlineSMOTE",
     "lale.lib.imblearn.SVMSMOTE",
     "lale.lib.imblearn.RandomOverSampler",
+    "lale.lib.imblearn.RandomUnderSampler",
     "lale.lib.imblearn.CondensedNearestNeighbour",
     "lale.lib.imblearn.EditedNearestNeighbours",
     "lale.lib.imblearn.RepeatedEditedNearestNeighbours",
@@ -141,7 +142,7 @@ resamplers = [
 for res in resamplers:
     setattr(
         TestResamplers,
-        "test_{0}".format(res.split(".")[-1]),
+        f"test_{res.rsplit('.', maxsplit=1)[-1]}",
         create_function_test_resampler(res),
     )
 
@@ -189,3 +190,59 @@ class TestImblearn(unittest.TestCase):
         )
         trained = pipeline.fit(self.X_train, y_train)
         _ = trained.predict(self.X_test)
+
+    def test_smoten(self):
+        from lale.lib.imblearn import SMOTEN
+
+        (train_X, train_y), (test_X, _) = lale.datasets.openml.fetch(
+            "breast-cancer", "classification", astype="pandas", preprocess=False
+        )
+        # SMOTEN can only use Nominal features
+        pipeline = SMOTEN(operator=OrdinalEncoder() >> LogisticRegression())
+        trained = pipeline.fit(train_X, train_y)
+        _ = trained.predict(test_X)
+
+    def test_smotenc(self):
+        from lale.lib.imblearn import SMOTENC
+
+        (train_X, train_y), (test_X, _) = lale.datasets.openml.fetch(
+            "ricci", "classification", astype="pandas", preprocess=False
+        )
+        # SMOTENC can handle both Nominal and Continuous features
+        pipeline = SMOTENC(
+            operator=(
+                Project(columns={"type": "number"})
+                & (Project(columns={"type": "string"}) >> OrdinalEncoder())
+            )
+            >> ConcatFeatures
+            >> LogisticRegression()
+        )
+        trained = pipeline.fit(train_X, train_y)
+        _ = trained.predict(test_X)
+
+    def test_smotenc_with_disparate_impact_remover(self):
+        from lale.lib.aif360 import DisparateImpactRemover
+        from lale.lib.imblearn import SMOTENC
+
+        X, y, fairness_info = lale.lib.aif360.fetch_ricci_df(preprocess=False)
+        pipeline = SMOTENC(
+            operator=(
+                DisparateImpactRemover(
+                    **fairness_info,
+                    preparation=(
+                        Project(columns={"type": "number"})
+                        & (Project(columns={"type": "string"}) >> OrdinalEncoder())
+                    )
+                    >> ConcatFeatures,
+                )
+                >> LogisticRegression()
+            )
+        )
+        (
+            train_X,
+            test_X,
+            train_y,
+            _,
+        ) = lale.lib.aif360.fair_stratified_train_test_split(X, y, **fairness_info)
+        trained = pipeline.fit(train_X, train_y)
+        _ = trained.predict(test_X)

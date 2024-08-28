@@ -14,18 +14,17 @@
 
 import unittest
 from test import EnableSchemaValidation
-from test.mock_module import UnknownOp
-from typing import Any
+from test.mock_module import CustomOrigOperator, UnknownOp
 
 import numpy as np
 from lightgbm import LGBMClassifier as baz
-from sklearn.decomposition import PCA as foo
-from sklearn.linear_model import Lars as foobar
-from xgboost import XGBClassifier as bar
+from sklearn.decomposition import PCA as sk_PCA
+from sklearn.linear_model import Lars as sk_lars
+from xgboost import XGBClassifier as alt_xgb
 
 import lale
-import lale.schemas as schemas
 import lale.type_checking
+from lale import schemas
 from lale.search.lale_grid_search_cv import get_grid_search_parameter_grids
 
 
@@ -33,19 +32,19 @@ class TestCustomSchema(unittest.TestCase):
     def setUp(self):
         import sklearn.decomposition
 
-        import lale.lib.sklearn
+        from lale.lib.sklearn import PCA as lale_PCA
         from lale.operators import make_operator
 
         self.sk_pca = make_operator(sklearn.decomposition.PCA, schemas={})
-        self.ll_pca = lale.lib.sklearn.PCA
+        self.ll_pca = lale_PCA
         self.maxDiff = None
 
     def test_override_schemas(self):
         with EnableSchemaValidation():
             init_schemas = self.sk_pca._schemas
             pca_schemas = self.ll_pca._schemas
-            foo = self.sk_pca.customize_schema(schemas=schemas.JSON(pca_schemas))
-            self.assertEqual(foo._schemas, pca_schemas)
+            custom = self.sk_pca.customize_schema(schemas=schemas.JSON(pca_schemas))
+            self.assertEqual(custom._schemas, pca_schemas)
             self.assertEqual(self.sk_pca._schemas, init_schemas)
             self.assertRaises(Exception, self.sk_pca.customize_schema, schemas={})
 
@@ -53,9 +52,9 @@ class TestCustomSchema(unittest.TestCase):
         with EnableSchemaValidation():
             init_input_schema = self.sk_pca.get_schema("input_fit")
             pca_input = self.ll_pca.get_schema("input_fit")
-            foo = self.sk_pca.customize_schema(input_fit=schemas.JSON(pca_input))
-            self.assertEqual(foo.get_schema("input_fit"), pca_input)
-            lale.type_checking.validate_is_schema(foo._schemas)
+            custom = self.sk_pca.customize_schema(input_fit=schemas.JSON(pca_input))
+            self.assertEqual(custom.get_schema("input_fit"), pca_input)
+            lale.type_checking.validate_is_schema(custom._schemas)
             self.assertEqual(self.sk_pca.get_schema("input_fit"), init_input_schema)
             self.assertRaises(Exception, self.sk_pca.customize_schema, input_fit=42)
             _ = self.sk_pca.customize_schema(input_foo=pca_input)
@@ -64,11 +63,11 @@ class TestCustomSchema(unittest.TestCase):
         with EnableSchemaValidation():
             init_output_schema = self.sk_pca.get_schema("output_transform")
             pca_output = self.ll_pca.get_schema("output_transform")
-            foo = self.sk_pca.customize_schema(
+            custom = self.sk_pca.customize_schema(
                 output_transform=schemas.JSON(pca_output)
             )
-            self.assertEqual(foo.get_schema("output_transform"), pca_output)
-            lale.type_checking.validate_is_schema(foo._schemas)
+            self.assertEqual(custom.get_schema("output_transform"), pca_output)
+            lale.type_checking.validate_is_schema(custom._schemas)
             self.assertEqual(
                 self.sk_pca.get_schema("output_transform"), init_output_schema
             )
@@ -92,20 +91,20 @@ class TestCustomSchema(unittest.TestCase):
                 {"type": "array", "items": {"type": "number"}},
             ]
         }
-        foo = self.sk_pca.customize_schema(output_transform=pca_output)
-        self.assertEqual(foo.get_schema("output_transform"), expected)
-        lale.type_checking.validate_is_schema(foo._schemas)
+        custom = self.sk_pca.customize_schema(output_transform=pca_output)
+        self.assertEqual(custom.get_schema("output_transform"), expected)
+        lale.type_checking.validate_is_schema(custom._schemas)
         self.assertEqual(self.sk_pca.get_schema("output_transform"), init_output_schema)
 
     def test_override_bool_param_sk(self):
         with EnableSchemaValidation():
             init = self.sk_pca.hyperparam_schema("whiten")
             expected = {"default": True, "type": "boolean", "description": "override"}
-            foo = self.sk_pca.customize_schema(
+            custom = self.sk_pca.customize_schema(
                 whiten=schemas.Bool(default=True, desc="override")
             )
-            self.assertEqual(foo.hyperparam_schema("whiten"), expected)
-            lale.type_checking.validate_is_schema(foo._schemas)
+            self.assertEqual(custom.hyperparam_schema("whiten"), expected)
+            lale.type_checking.validate_is_schema(custom._schemas)
             self.assertEqual(self.sk_pca.hyperparam_schema("whiten"), init)
             self.assertRaises(Exception, self.sk_pca.customize_schema, whitenX=42)
 
@@ -113,9 +112,9 @@ class TestCustomSchema(unittest.TestCase):
         with EnableSchemaValidation():
             init = self.ll_pca.hyperparam_schema("whiten")
             expected = {"default": True, "type": "boolean"}
-            foo = self.ll_pca.customize_schema(whiten=schemas.Bool(default=True))
-            self.assertEqual(foo.hyperparam_schema("whiten"), expected)
-            lale.type_checking.validate_is_schema(foo._schemas)
+            custom = self.ll_pca.customize_schema(whiten=schemas.Bool(default=True))
+            self.assertEqual(custom.hyperparam_schema("whiten"), expected)
+            lale.type_checking.validate_is_schema(custom._schemas)
             self.assertEqual(self.ll_pca.hyperparam_schema("whiten"), init)
             self.assertRaises(Exception, self.ll_pca.customize_schema, whitenX=42)
 
@@ -123,11 +122,11 @@ class TestCustomSchema(unittest.TestCase):
         with EnableSchemaValidation():
             init = self.ll_pca.hyperparam_schema("svd_solver")
             expected = {"default": "full", "enum": ["auto", "full"]}
-            foo = self.ll_pca.customize_schema(
+            custom = self.ll_pca.customize_schema(
                 svd_solver=schemas.Enum(default="full", values=["auto", "full"])
             )
-            self.assertEqual(foo.hyperparam_schema("svd_solver"), expected)
-            lale.type_checking.validate_is_schema(foo._schemas)
+            self.assertEqual(custom.hyperparam_schema("svd_solver"), expected)
+            lale.type_checking.validate_is_schema(custom._schemas)
             self.assertEqual(self.ll_pca.hyperparam_schema("svd_solver"), init)
 
     def test_override_float_param(self):
@@ -140,7 +139,7 @@ class TestCustomSchema(unittest.TestCase):
             "exclusiveMaximum": True,
             "exclusiveMinimum": False,
         }
-        foo = self.ll_pca.customize_schema(
+        custom = self.ll_pca.customize_schema(
             tol=schemas.Float(
                 default=0.1,
                 minimum=-10,
@@ -149,8 +148,8 @@ class TestCustomSchema(unittest.TestCase):
                 exclusiveMinimum=False,
             )
         )
-        self.assertEqual(foo.hyperparam_schema("tol"), expected)
-        lale.type_checking.validate_is_schema(foo._schemas)
+        self.assertEqual(custom.hyperparam_schema("tol"), expected)
+        lale.type_checking.validate_is_schema(custom._schemas)
         self.assertEqual(self.ll_pca.hyperparam_schema("tol"), init)
 
     def test_override_int_param(self):
@@ -163,7 +162,7 @@ class TestCustomSchema(unittest.TestCase):
             "exclusiveMaximum": True,
             "exclusiveMinimum": False,
         }
-        foo = self.ll_pca.customize_schema(
+        custom = self.ll_pca.customize_schema(
             iterated_power=schemas.Int(
                 default=1,
                 minimum=-10,
@@ -172,16 +171,16 @@ class TestCustomSchema(unittest.TestCase):
                 exclusiveMinimum=False,
             )
         )
-        self.assertEqual(foo.hyperparam_schema("iterated_power"), expected)
-        lale.type_checking.validate_is_schema(foo._schemas)
+        self.assertEqual(custom.hyperparam_schema("iterated_power"), expected)
+        lale.type_checking.validate_is_schema(custom._schemas)
         self.assertEqual(self.ll_pca.hyperparam_schema("iterated_power"), init)
 
     def test_override_null_param(self):
         init = self.ll_pca.hyperparam_schema("n_components")
         expected = {"enum": [None]}
-        foo = self.ll_pca.customize_schema(n_components=schemas.Null())
-        self.assertEqual(foo.hyperparam_schema("n_components"), expected)
-        lale.type_checking.validate_is_schema(foo._schemas)
+        custom = self.ll_pca.customize_schema(n_components=schemas.Null())
+        self.assertEqual(custom.hyperparam_schema("n_components"), expected)
+        lale.type_checking.validate_is_schema(custom._schemas)
         self.assertEqual(self.ll_pca.hyperparam_schema("n_components"), init)
 
     def test_override_json_param(self):
@@ -192,9 +191,9 @@ class TestCustomSchema(unittest.TestCase):
             "minimum": 0.2,
             "default": 1.0,
         }
-        foo = self.ll_pca.customize_schema(tol=schemas.JSON(expected))
-        self.assertEqual(foo.hyperparam_schema("tol"), expected)
-        lale.type_checking.validate_is_schema(foo._schemas)
+        custom = self.ll_pca.customize_schema(tol=schemas.JSON(expected))
+        self.assertEqual(custom.hyperparam_schema("tol"), expected)
+        lale.type_checking.validate_is_schema(custom._schemas)
         self.assertEqual(self.ll_pca.hyperparam_schema("tol"), init)
 
     def test_override_any_param(self):
@@ -203,13 +202,13 @@ class TestCustomSchema(unittest.TestCase):
             "anyOf": [{"type": "integer"}, {"enum": ["auto", "full"]}],
             "default": "auto",
         }
-        foo = self.ll_pca.customize_schema(
+        custom = self.ll_pca.customize_schema(
             iterated_power=schemas.AnyOf(
                 [schemas.Int(), schemas.Enum(["auto", "full"])], default="auto"
             )
         )
-        self.assertEqual(foo.hyperparam_schema("iterated_power"), expected)
-        lale.type_checking.validate_is_schema(foo._schemas)
+        self.assertEqual(custom.hyperparam_schema("iterated_power"), expected)
+        lale.type_checking.validate_is_schema(custom._schemas)
         self.assertEqual(self.ll_pca.hyperparam_schema("iterated_power"), init)
 
     def test_override_array_param(self):
@@ -220,11 +219,11 @@ class TestCustomSchema(unittest.TestCase):
             "maxItems": 20,
             "items": {"type": "integer"},
         }
-        foo = self.sk_pca.customize_schema(
+        custom = self.sk_pca.customize_schema(
             copy=schemas.Array(minItems=1, maxItems=20, items=schemas.Int())
         )
-        self.assertEqual(foo.hyperparam_schema("copy"), expected)
-        lale.type_checking.validate_is_schema(foo._schemas)
+        self.assertEqual(custom.hyperparam_schema("copy"), expected)
+        lale.type_checking.validate_is_schema(custom._schemas)
         self.assertEqual(self.sk_pca.hyperparam_schema("copy"), init)
 
     def test_override_object_param(self):
@@ -235,38 +234,19 @@ class TestCustomSchema(unittest.TestCase):
             "additionalProperties": False,
             "properties": {"X": {"type": "array", "items": {"type": "number"}}},
         }
-        foo = self.sk_pca.customize_schema(
+        custom = self.sk_pca.customize_schema(
             input_fit=schemas.Object(
                 required=["X"],
                 additionalProperties=False,
                 X=schemas.Array(schemas.Float()),
             )
         )
-        self.assertEqual(foo.get_schema("input_fit"), expected)
-        lale.type_checking.validate_is_schema(foo.get_schema("input_fit"))
+        self.assertEqual(custom.get_schema("input_fit"), expected)
+        lale.type_checking.validate_is_schema(custom.get_schema("input_fit"))
         self.assertEqual(self.sk_pca.get_schema("input_fit"), init)
 
     def test_add_constraint(self):
-        init = self.sk_pca.hyperparam_schema()
-        init_expected = {
-            "allOf": [
-                {
-                    "type": "object",
-                    "relevantToOptimizer": [],
-                    "additionalProperties": False,
-                    "properties": {
-                        "n_components": {"default": None},
-                        "copy": {"default": True},
-                        "whiten": {"default": False},
-                        "svd_solver": {"default": "auto"},
-                        "tol": {"default": 0.0},
-                        "iterated_power": {"default": "auto"},
-                        "random_state": {"default": None},
-                    },
-                }
-            ]
-        }
-        self.assertEqual(init, init_expected)
+        init_expected = self.sk_pca.hyperparam_schema()
         expected = {
             "allOf": [
                 init_expected["allOf"][0],
@@ -290,7 +270,7 @@ class TestCustomSchema(unittest.TestCase):
                 },
             ]
         }
-        foo = self.sk_pca.customize_schema(
+        custom = self.sk_pca.customize_schema(
             constraint=schemas.AnyOf(
                 [
                     schemas.Object(n_components=schemas.Not(schemas.Enum(["mle"]))),
@@ -298,18 +278,77 @@ class TestCustomSchema(unittest.TestCase):
                 ]
             )
         )
-        self.assertEqual(foo.hyperparam_schema(), expected)
-        lale.type_checking.validate_is_schema(foo._schemas)
-        self.assertEqual(self.sk_pca.hyperparam_schema(), init)
+        self.assertEqual(custom.hyperparam_schema(), expected)
+        lale.type_checking.validate_is_schema(custom._schemas)
+        self.assertEqual(self.sk_pca.hyperparam_schema(), init_expected)
+
+    def test_add_multiple_constraints(self):
+        init_expected = self.sk_pca.hyperparam_schema()
+        expected = {
+            "allOf": [
+                init_expected["allOf"][0],
+                {
+                    "anyOf": [
+                        {
+                            "type": "object",
+                            "properties": {
+                                "n_components": {
+                                    "not": {"enum": ["mle"]},
+                                }
+                            },
+                        },
+                        {
+                            "type": "object",
+                            "properties": {
+                                "svd_solver": {"enum": ["full", "auto"]},
+                            },
+                        },
+                    ]
+                },
+                {
+                    "anyOf": [
+                        {
+                            "type": "object",
+                            "properties": {"copy": {"enum": [False]}},
+                        },
+                        {
+                            "type": "object",
+                            "properties": {
+                                "whiten": {"enum": [False]},
+                            },
+                        },
+                    ]
+                },
+            ]
+        }
+        custom = self.sk_pca.customize_schema(
+            constraint=[
+                schemas.AnyOf(
+                    [
+                        schemas.Object(n_components=schemas.Not(schemas.Enum(["mle"]))),
+                        schemas.Object(svd_solver=schemas.Enum(["full", "auto"])),
+                    ]
+                ),
+                schemas.AnyOf(
+                    [
+                        schemas.Object(copy=schemas.Enum([False])),
+                        schemas.Object(whiten=schemas.Enum([False])),
+                    ]
+                ),
+            ]
+        )
+        self.assertEqual(custom.hyperparam_schema(), expected)
+        lale.type_checking.validate_is_schema(custom._schemas)
+        self.assertEqual(self.sk_pca.hyperparam_schema(), init_expected)
 
     def test_override_relevant(self):
         init = self.ll_pca.hyperparam_schema()["allOf"][0]["relevantToOptimizer"]
         expected = ["svd_solver"]
-        foo = self.ll_pca.customize_schema(relevantToOptimizer=["svd_solver"])
+        custom = self.ll_pca.customize_schema(relevantToOptimizer=["svd_solver"])
         self.assertEqual(
-            foo.hyperparam_schema()["allOf"][0]["relevantToOptimizer"], expected
+            custom.hyperparam_schema()["allOf"][0]["relevantToOptimizer"], expected
         )
-        lale.type_checking.validate_is_schema(foo._schemas)
+        lale.type_checking.validate_is_schema(custom._schemas)
         self.assertEqual(
             self.ll_pca.hyperparam_schema()["allOf"][0]["relevantToOptimizer"], init
         )
@@ -325,9 +364,9 @@ class TestCustomSchema(unittest.TestCase):
                 "op": ["estimator", "classifier", "interpretable"],
                 "post": ["probabilities"],
             }
-            foo = self.ll_pca.customize_schema(tags=tags)
-            self.assertEqual(foo._schemas["tags"], tags)
-            lale.type_checking.validate_is_schema(foo._schemas)
+            custom = self.ll_pca.customize_schema(tags=tags)
+            self.assertEqual(custom._schemas["tags"], tags)
+            lale.type_checking.validate_is_schema(custom._schemas)
             self.assertEqual(self.ll_pca._schemas["tags"], init)
             self.assertRaises(Exception, self.sk_pca.customize_schema, tags=42)
 
@@ -336,14 +375,21 @@ class TestCustomSchema(unittest.TestCase):
         try:
             from lale.lib.autogen import Lars
             from lale.lib.lightgbm import LGBMClassifier
-            from lale.lib.sklearn import PCA
             from lale.lib.xgboost import XGBClassifier
 
-            lale.wrap_imported_operators()
-            self.assertEqual(foo._schemas, PCA._schemas)  # type: ignore
-            self.assertEqual(bar._schemas, XGBClassifier._schemas)  # type: ignore
+            lale.wrap_imported_operators(
+                exclude_classes=["sk_PCA"],
+                wrapper_modules=["test.mock_custom_operators"],
+            )
+
+            from lale.operators import PlannedIndividualOp
+
+            op_obj = sk_PCA()
+            self.assertIsInstance(op_obj, sk_PCA)
+            self.assertEqual(alt_xgb._schemas, XGBClassifier._schemas)  # type: ignore
             self.assertEqual(baz._schemas, LGBMClassifier._schemas)  # type: ignore
-            self.assertEqual(foobar._schemas, Lars._schemas)
+            self.assertEqual(sk_lars._schemas, Lars._schemas)
+            self.assertIsInstance(CustomOrigOperator, PlannedIndividualOp)
         finally:
             for sym, obj in old_globals.items():
                 globals()[sym] = obj
@@ -511,11 +557,7 @@ class TestWrapUnknownOps(unittest.TestCase):
 
             self.assertFalse(isinstance(UnknownOp, PlannedIndividualOp))
             lale.wrap_imported_operators()
-            self.assertTrue(isinstance(UnknownOp, PlannedIndividualOp))
-            uop: Any = UnknownOp
-            self.assertEqual(uop.hyperparam_schema(), self.expected_schema)
-            instance = uop(n_neighbors=3)
-            self.assertEqual(instance.hyperparams(), {"n_neighbors": 3})
+            self.assertFalse(isinstance(UnknownOp, PlannedIndividualOp))
         finally:
             for sym, obj in old_globals.items():
                 globals()[sym] = obj

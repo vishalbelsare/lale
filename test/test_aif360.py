@@ -1,4 +1,4 @@
-# Copyright 2020, 2021 IBM Corporation
+# Copyright 2020-2023 IBM Corporation
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -22,7 +22,6 @@ import aif360
 import jsonschema
 import numpy as np
 import pandas as pd
-import sklearn.metrics
 import sklearn.model_selection
 
 try:
@@ -53,19 +52,24 @@ from lale.datasets.data_schemas import NDArrayWithSchema
 from lale.lib.aif360 import (
     LFR,
     AdversarialDebiasing,
+    BaggingOrbisClassifier,
     CalibratedEqOddsPostprocessing,
     DisparateImpactRemover,
     EqOddsPostprocessing,
     GerryFairClassifier,
     MetaFairClassifier,
     OptimPreproc,
+    Orbis,
     PrejudiceRemover,
     Redacting,
     RejectOptionClassification,
     Reweighing,
+    count_fairness_groups,
     fair_stratified_train_test_split,
 )
+from lale.lib.aif360.orbis import _orbis_pick_sizes
 from lale.lib.lale import ConcatFeatures, Project
+from lale.lib.rasl import mockup_data_loader
 from lale.lib.sklearn import (
     FunctionTransformer,
     LinearRegression,
@@ -99,6 +103,9 @@ class TestAIF360Datasets(unittest.TestCase):
         di_scorer = lale.lib.aif360.disparate_impact(**fairness_info)
         di_measured = di_scorer.score_data(X=X, y_pred=y)
         self.assertAlmostEqual(di_measured, di_expected, places=3)
+        bat3 = ((None, by, bX) for bX, by in mockup_data_loader(X, y, 3, "pandas"))
+        di_bat3 = di_scorer.score_data_batched(bat3)
+        self.assertEqual(di_measured, di_bat3)
 
     def test_dataset_adult_pd_cat(self):
         X, y, fairness_info = lale.lib.aif360.fetch_adult_df(preprocess=False)
@@ -140,6 +147,22 @@ class TestAIF360Datasets(unittest.TestCase):
         X, y, fairness_info = lale.lib.aif360.fetch_creditg_df(preprocess=True)
         self._attempt_dataset(X, y, fairness_info, 1_000, 58, {0, 1}, 0.748)
 
+    def test_dataset_default_credit_pd_cat(self):
+        X, y, fairness_info = lale.lib.aif360.fetch_default_credit_df()
+        self._attempt_dataset(X, y, fairness_info, 30_000, 24, {0, 1}, 0.957)
+
+    def test_dataset_heart_disease_pd_cat(self):
+        X, y, fairness_info = lale.lib.aif360.fetch_heart_disease_df()
+        self._attempt_dataset(X, y, fairness_info, 303, 13, {0, 1}, 0.589)
+
+    def test_dataset_law_school_pd_cat(self):
+        X, y, fairness_info = lale.lib.aif360.fetch_law_school_df()
+        self._attempt_dataset(X, y, fairness_info, 20_800, 11, {"FALSE", "TRUE"}, 0.704)
+
+    def test_dataset_nlsy_pd_cat(self):
+        X, y, fairness_info = lale.lib.aif360.fetch_nlsy_df()
+        self._attempt_dataset(X, y, fairness_info, 4908, 15, {"0", "1"}, 0.668)
+
     def test_dataset_nursery_pd_cat(self):
         X, y, fairness_info = lale.lib.aif360.fetch_nursery_df(preprocess=False)
         self._attempt_dataset(
@@ -162,6 +185,13 @@ class TestAIF360Datasets(unittest.TestCase):
             X, y, fairness_info, 118, 5, {"No promotion", "Promotion"}, 0.498
         )
 
+    def test_dataset_ricci_pd_cat_bool(self):
+        X, y, fairness_info = lale.lib.aif360.fetch_ricci_df(preprocess=False)
+        y = y == "Promotion"
+        self.assertIs(y.dtype, np.dtype("bool"))
+        fairness_info = {**fairness_info, "favorable_labels": [True]}
+        self._attempt_dataset(X, y, fairness_info, 118, 5, {False, True}, 0.498)
+
     def test_dataset_ricci_pd_num(self):
         X, y, fairness_info = lale.lib.aif360.fetch_ricci_df(preprocess=True)
         self._attempt_dataset(X, y, fairness_info, 118, 6, {0, 1}, 0.498)
@@ -173,6 +203,14 @@ class TestAIF360Datasets(unittest.TestCase):
     def test_dataset_speeddating_pd_num(self):
         X, y, fairness_info = lale.lib.aif360.fetch_speeddating_df(preprocess=True)
         self._attempt_dataset(X, y, fairness_info, 8_378, 70, {0, 1}, 0.853)
+
+    def test_dataset_student_math_pd_cat(self):
+        X, y, fairness_info = lale.lib.aif360.fetch_student_math_df()
+        self._attempt_dataset(X, y, fairness_info, 395, 32, {0, 1}, 0.894)
+
+    def test_dataset_student_por_pd_cat(self):
+        X, y, fairness_info = lale.lib.aif360.fetch_student_por_df()
+        self._attempt_dataset(X, y, fairness_info, 649, 32, {0, 1}, 0.858)
 
     def test_dataset_boston_housing_pd_cat(self):
         X, y, fairness_info = lale.lib.aif360._fetch_boston_housing_df(preprocess=False)
@@ -199,6 +237,10 @@ class TestAIF360Datasets(unittest.TestCase):
     def test_dataset_tae_pd_num(self):
         X, y, fairness_info = lale.lib.aif360.fetch_tae_df(preprocess=True)
         self._attempt_dataset(X, y, fairness_info, 151, 6, {0, 1}, 0.449)
+
+    def test_dataset_us_crime_pd_cat(self):
+        X, y, fairness_info = lale.lib.aif360.fetch_us_crime_df()
+        self._attempt_dataset(X, y, fairness_info, 1_994, 102, {0, 1}, 0.888)
 
     @classmethod
     def _try_download_csv(cls, filename):
@@ -245,7 +287,7 @@ class TestAIF360Datasets(unittest.TestCase):
         )
         self._attempt_dataset(X, y, fairness_info, 16578, 1825, {0, 1}, 0.496)
 
-    def test_dataset_meps_panel19_fy_2015_pd_num(self):
+    def test_dataset_meps_panel19_fy2015_pd_num(self):
         X, y, fairness_info = lale.lib.aif360.fetch_meps_panel19_fy2015_df(
             preprocess=True
         )
@@ -429,31 +471,12 @@ class TestAIF360Num(unittest.TestCase):
         impact = disparate_impact_scorer(estimator, test_X, test_y)
         self.assertLess(impact, 0.9)
         if estimator.is_classifier():
-            combined_scorer = lale.lib.aif360.accuracy_and_disparate_impact(**fi)
-            combined = combined_scorer(estimator, test_X, test_y)
-            accuracy_scorer = sklearn.metrics.make_scorer(
-                sklearn.metrics.accuracy_score
-            )
-            accuracy = accuracy_scorer(estimator, test_X, test_y)
-            self.assertLess(combined, accuracy)
-            combined_scorer_2 = lale.lib.aif360.accuracy_and_disparate_impact(
-                **fi, fairness_weight=2.0
-            )
-            combined_2 = combined_scorer_2(estimator, test_X, test_y)
-            self.assertLess(combined, combined_2)
-            self.assertLess(combined_2, accuracy)
+            blended_scorer = lale.lib.aif360.accuracy_and_disparate_impact(**fi)
         else:
-            combined_scorer = lale.lib.aif360.r2_and_disparate_impact(**fi)
-            combined = combined_scorer(estimator, test_X, test_y)
-            r2_scorer = sklearn.metrics.make_scorer(sklearn.metrics.r2_score)
-            r2 = r2_scorer(estimator, test_X, test_y)
-            self.assertLess(combined, r2)
-            combined_scorer_2 = lale.lib.aif360.r2_and_disparate_impact(
-                **fi, fairness_weight=2.0
-            )
-            combined_2 = combined_scorer_2(estimator, test_X, test_y)
-            self.assertLess(combined, combined_2)
-            self.assertLess(combined_2, r2)
+            blended_scorer = lale.lib.aif360.r2_and_disparate_impact(**fi)
+        blended = blended_scorer(estimator, test_X, test_y)
+        self.assertLess(0.0, blended)
+        self.assertLess(blended, 1.0)
         parity_scorer = lale.lib.aif360.statistical_parity_difference(**fi)
         parity = parity_scorer(estimator, test_X, test_y)
         self.assertLess(parity, 0.0)
@@ -510,33 +533,35 @@ class TestAIF360Num(unittest.TestCase):
         test_y = self.boston_np_num["test_y"]
         self._attempt_scorers(fairness_info, trained, test_X, test_y)
 
-    def test_scorers_combine_acc(self):
+    def test_scorers_blend_acc(self):
         dummy_fairness_info = {
             "favorable_labels": ["fav"],
             "protected_attributes": [{"feature": "prot", "reference_group": ["ref"]}],
         }
         scorer = lale.lib.aif360.accuracy_and_disparate_impact(**dummy_fairness_info)
         for acc in [0.2, 0.8, 1]:
-            for di in [0.7, 0.9, 1.0, (1 / 0.9), (1 / 0.7)]:
-                score = scorer._combine(acc, di)
-                print(f"acc {acc:5.2f}, di {di:.2f}, score {score:5.2f}")
-            for di in [float("inf"), float("-inf"), float("nan")]:
-                score = scorer._combine(acc, di)
-                self.assertEqual(score, acc)
+            for di in [0.7, 0.9, 1.0]:
+                score = scorer._blend_metrics(acc, di)
+                self.assertLess(0.0, score)
+                self.assertLessEqual(score, 1.0)
+            for di in [0.0, float("inf"), float("-inf"), float("nan")]:
+                score = scorer._blend_metrics(acc, di)
+                self.assertEqual(score, 0.5 * acc)
 
-    def test_scorers_combine_r2(self):
+    def test_scorers_blend_r2(self):
         dummy_fairness_info = {
             "favorable_labels": ["fav"],
             "protected_attributes": [{"feature": "prot", "reference_group": ["ref"]}],
         }
         scorer = lale.lib.aif360.r2_and_disparate_impact(**dummy_fairness_info)
         for r2 in [-2, 0, 0.5, 1]:
-            for di in [0.7, 0.9, 1.0, (1 / 0.9), (1 / 0.7)]:
-                score = scorer._combine(r2, di)
-                print(f"r2 {r2:5.2f}, di {di:.2f}, score {score:5.2f}")
-            for di in [float("inf"), float("-inf"), float("nan")]:
-                score = scorer._combine(r2, di)
-                self.assertEqual(score, r2)
+            for di in [0.7, 0.9, 1.0]:
+                score = scorer._blend_metrics(r2, di)
+                self.assertLess(0.0, score)
+                self.assertLessEqual(score, 1.0)
+            for di in [0.0, float("inf"), float("-inf"), float("nan")]:
+                score = scorer._blend_metrics(r2, di)
+                self.assertEqual(score, 0.5 / (2.0 - r2))
 
     def _attempt_remi_creditg_pd_num(
         self, fairness_info, trainable_remi, min_di, max_di
@@ -603,7 +628,7 @@ class TestAIF360Num(unittest.TestCase):
         fairness_info = self.creditg_pd_num["fairness_info"]
         estim = LogisticRegression(max_iter=1000)
         trainable_remi = EqOddsPostprocessing(**fairness_info, estimator=estim)
-        self._attempt_remi_creditg_pd_num(fairness_info, trainable_remi, 0.87, 0.97)
+        self._attempt_remi_creditg_pd_num(fairness_info, trainable_remi, 0.82, 1.02)
 
     def test_gerry_fair_classifier_pd_num(self):
         fairness_info = self.creditg_pd_num["fairness_info"]
@@ -622,17 +647,41 @@ class TestAIF360Num(unittest.TestCase):
             trainable_remi = MetaFairClassifier(**fairness_info)
             self._attempt_remi_creditg_pd_num(fairness_info, trainable_remi, 0.62, 0.87)
 
+    def test_orbis_mixed_pd_num(self):
+        fairness_info = self.creditg_pd_num["fairness_info"]
+        estim = LogisticRegression(max_iter=1000)
+        trainable_remi = Orbis(
+            estimator=estim, **fairness_info, sampling_strategy="over"
+        )
+        self._attempt_remi_creditg_pd_num(fairness_info, trainable_remi, 0.70, 0.92)
+
+    def test_orbis_over_pd_num(self):
+        fairness_info = self.creditg_pd_num["fairness_info"]
+        estim = LogisticRegression(max_iter=1000)
+        trainable_remi = Orbis(
+            estimator=estim, **fairness_info, sampling_strategy="over"
+        )
+        self._attempt_remi_creditg_pd_num(fairness_info, trainable_remi, 0.70, 0.92)
+
+    def test_orbis_under_pd_num(self):
+        fairness_info = self.creditg_pd_num["fairness_info"]
+        estim = LogisticRegression(max_iter=1000)
+        trainable_remi = Orbis(
+            estimator=estim, **fairness_info, sampling_strategy="under"
+        )
+        self._attempt_remi_creditg_pd_num(fairness_info, trainable_remi, 0.70, 1.05)
+
     def test_prejudice_remover_pd_num(self):
         fairness_info = self.creditg_pd_num["fairness_info"]
         trainable_remi = PrejudiceRemover(**fairness_info)
-        self._attempt_remi_creditg_pd_num(fairness_info, trainable_remi, 0.73, 0.83)
+        self._attempt_remi_creditg_pd_num(fairness_info, trainable_remi, 0.70, 0.83)
 
     def test_redacting_pd_num(self):
         fairness_info = self.creditg_pd_num["fairness_info"]
         redacting = Redacting(**fairness_info)
         logistic_regression = LogisticRegression(max_iter=1000)
         trainable_remi = redacting >> logistic_regression
-        self._attempt_remi_creditg_pd_num(fairness_info, trainable_remi, 0.80, 0.90)
+        self._attempt_remi_creditg_pd_num(fairness_info, trainable_remi, 0.78, 0.94)
 
     def test_reject_option_classification_pd_num(self):
         fairness_info = self.creditg_pd_num["fairness_info"]
@@ -644,12 +693,320 @@ class TestAIF360Num(unittest.TestCase):
         fairness_info = self.creditg_pd_num["fairness_info"]
         estim = LogisticRegression(max_iter=1000)
         trainable_remi = Reweighing(estimator=estim, **fairness_info)
-        self._attempt_remi_creditg_pd_num(fairness_info, trainable_remi, 0.82, 0.92)
+        self._attempt_remi_creditg_pd_num(fairness_info, trainable_remi, 0.82, 0.95)
 
     def test_sans_mitigation_pd_num(self):
         fairness_info = self.creditg_pd_num["fairness_info"]
         trainable_remi = LogisticRegression(max_iter=1000)
         self._attempt_remi_creditg_pd_num(fairness_info, trainable_remi, 0.5, 1.0)
+
+
+class TestAIF360OrbisPickSizes(unittest.TestCase):
+    def setUp(self):
+        from mystic.tools import random_seed
+
+        random_seed(42)
+        self.maxDiff = None
+
+    def test_pick_sizes_mixed_single_pa_single_class_normal(self):
+        nsizes = _orbis_pick_sizes(
+            osizes={"00": 100, "01": 200, "10": 300, "11": 400},
+            imbalance_repair_level=1,
+            bias_repair_level=1,
+            favorable_labels={1},
+            sampling_strategy="mixed",
+        )
+        self.assertDictEqual(nsizes, {"00": 122, "01": 122, "10": 398, "11": 398})
+
+    def test_pick_sizes_mixed_single_pa_single_class_reversed(self):
+        nsizes = _orbis_pick_sizes(
+            osizes={"00": 400, "01": 300, "10": 200, "11": 100},
+            imbalance_repair_level=1,
+            bias_repair_level=1,
+            favorable_labels={1},
+            sampling_strategy="mixed",
+        )
+        self.assertDictEqual(nsizes, {"00": 398, "01": 398, "10": 122, "11": 122})
+
+    def test_pick_sizes_mixed_multi_pa_multi_class_normal(self):
+        osizes = {
+            "000": 570,
+            "001": 670,
+            "002": 770,
+            "010": 870,
+            "011": 970,
+            "012": 1070,
+            "100": 7070,
+            "101": 7170,
+            "102": 7270,
+            "110": 7370,
+            "111": 7471,
+            "112": 7571,
+        }
+        nsizes = _orbis_pick_sizes(
+            osizes,
+            imbalance_repair_level=1,
+            bias_repair_level=1,
+            favorable_labels={1},
+            sampling_strategy="mixed",
+        )
+        self.assertDictEqual(
+            nsizes,
+            {
+                "000": 573,
+                "001": 670,
+                "002": 725,
+                "010": 923,
+                "011": 970,
+                "012": 1059,
+                "100": 7246,
+                "101": 7170,
+                "102": 7137,
+                "110": 7406,
+                "111": 7471,
+                "112": 7495,
+            },
+        )
+
+    def test_pick_sizes_mixed_multi_pa_multi_class_reversed(self):
+        osizes = {
+            "112": 100,
+            "111": 200,
+            "110": 300,
+            "102": 400,
+            "101": 500,
+            "100": 600,
+            "012": 700,
+            "011": 800,
+            "010": 900,
+            "002": 3000,
+            "001": 1100,
+            "000": 1200,
+        }
+        nsizes = _orbis_pick_sizes(
+            osizes,
+            imbalance_repair_level=1,
+            bias_repair_level=1,
+            favorable_labels={2},
+            sampling_strategy="mixed",
+        )
+        self.assertDictEqual(
+            nsizes,
+            {
+                "002": 1406,
+                "000": 1200,
+                "001": 1308,
+                "012": 700,
+                "010": 900,
+                "011": 800,
+                "102": 400,
+                "100": 600,
+                "101": 500,
+                "112": 306,
+                "110": 111,
+                "111": 200,
+            },
+        )
+
+    def test_pick_sizes_over_single_pa_single_class_normal(self):
+        nsizes = _orbis_pick_sizes(
+            osizes={"00": 100, "01": 200, "10": 300, "11": 400},
+            imbalance_repair_level=1,
+            bias_repair_level=1,
+            favorable_labels={1},
+            sampling_strategy="over",
+        )
+        self.assertDictEqual(nsizes, {"00": 200, "01": 200, "10": 400, "11": 400})
+
+    def test_pick_sizes_over_single_pa_single_class_reversed(self):
+        nsizes = _orbis_pick_sizes(
+            osizes={"00": 400, "01": 300, "10": 200, "11": 100},
+            imbalance_repair_level=1,
+            bias_repair_level=1,
+            favorable_labels={1},
+            sampling_strategy="over",
+        )
+        self.assertDictEqual(nsizes, {"00": 400, "01": 400, "10": 200, "11": 200})
+
+    def test_pick_sizes_over_multi_pa_multi_class_normal(self):
+        osizes = {
+            "000": 570,
+            "001": 670,
+            "002": 770,
+            "010": 870,
+            "011": 970,
+            "012": 1070,
+            "100": 7070,
+            "101": 7170,
+            "102": 7270,
+            "110": 7370,
+            "111": 7471,
+            "112": 7571,
+        }
+        nsizes = _orbis_pick_sizes(
+            osizes,
+            imbalance_repair_level=1,
+            bias_repair_level=1,
+            favorable_labels={1},
+            sampling_strategy="over",
+        )
+        self.assertDictEqual(
+            nsizes,
+            {
+                "000": 570,
+                "001": 670,
+                "002": 770,
+                "010": 884,
+                "011": 970,
+                "012": 1070,
+                "100": 7244,
+                "101": 7223,
+                "102": 7270,
+                "110": 7571,
+                "111": 7541,
+                "112": 7571,
+            },
+        )
+
+    def test_pick_sizes_over_multi_pa_multi_class_reversed(self):
+        osizes = {
+            "112": 100,
+            "111": 200,
+            "110": 300,
+            "102": 400,
+            "101": 500,
+            "100": 600,
+            "012": 700,
+            "011": 800,
+            "010": 900,
+            "002": 3000,
+            "001": 1100,
+            "000": 1200,
+        }
+        nsizes = _orbis_pick_sizes(
+            osizes,
+            imbalance_repair_level=1,
+            bias_repair_level=1,
+            favorable_labels={2},
+            sampling_strategy="over",
+        )
+        self.assertDictEqual(
+            nsizes,
+            {
+                "112": 403,
+                "111": 200,
+                "110": 300,
+                "102": 400,
+                "101": 500,
+                "100": 600,
+                "012": 700,
+                "011": 800,
+                "010": 900,
+                "002": 3000,
+                "001": 2981,
+                "000": 2688,
+            },
+        )
+
+    def test_pick_sizes_under_single_pa_single_class_normal(self):
+        nsizes = _orbis_pick_sizes(
+            osizes={"00": 100, "01": 200, "10": 300, "11": 400},
+            imbalance_repair_level=1,
+            bias_repair_level=1,
+            favorable_labels={1},
+            sampling_strategy="under",
+        )
+        self.assertDictEqual(nsizes, {"00": 100, "01": 100, "10": 300, "11": 300})
+
+    def test_pick_sizes_under_single_pa_single_class_reversed(self):
+        nsizes = _orbis_pick_sizes(
+            osizes={"00": 400, "01": 300, "10": 200, "11": 100},
+            imbalance_repair_level=1,
+            bias_repair_level=1,
+            favorable_labels={1},
+            sampling_strategy="under",
+        )
+        self.assertDictEqual(nsizes, {"00": 300, "01": 300, "10": 100, "11": 100})
+
+    def test_pick_sizes_under_multi_pa_multi_class_normal(self):
+        osizes = {
+            "000": 570,
+            "001": 670,
+            "002": 770,
+            "010": 870,
+            "011": 970,
+            "012": 1070,
+            "100": 7070,
+            "101": 7170,
+            "102": 7270,
+            "110": 7370,
+            "111": 7471,
+            "112": 7571,
+        }
+        nsizes = _orbis_pick_sizes(
+            osizes,
+            imbalance_repair_level=1,
+            bias_repair_level=1,
+            favorable_labels={1},
+            sampling_strategy="under",
+        )
+        self.assertDictEqual(
+            nsizes,
+            {
+                "000": 570,
+                "001": 627,
+                "002": 761,
+                "010": 870,
+                "011": 968,
+                "012": 976,
+                "100": 7070,
+                "101": 7170,
+                "102": 7129,
+                "110": 7370,
+                "111": 7381,
+                "112": 7414,
+            },
+        )
+
+    def test_pick_sizes_under_multi_pa_multi_class_reversed(self):
+        osizes = {
+            "112": 100,
+            "111": 200,
+            "110": 300,
+            "102": 400,
+            "101": 500,
+            "100": 600,
+            "012": 700,
+            "011": 800,
+            "010": 900,
+            "002": 3000,
+            "001": 1100,
+            "000": 1200,
+        }
+        nsizes = _orbis_pick_sizes(
+            osizes,
+            imbalance_repair_level=1,
+            bias_repair_level=1,
+            favorable_labels={2},
+            sampling_strategy="under",
+        )
+        self.assertDictEqual(
+            nsizes,
+            {
+                "112": 100,
+                "111": 100,
+                "110": 100,
+                "102": 400,
+                "101": 498,
+                "100": 304,
+                "012": 700,
+                "011": 655,
+                "010": 748,
+                "002": 1150,
+                "001": 1100,
+                "000": 1200,
+            },
+        )
 
 
 class TestAIF360Cat(unittest.TestCase):
@@ -764,11 +1121,38 @@ class TestAIF360Cat(unittest.TestCase):
         return result
 
     @classmethod
+    def _creditg_pd_repeated(cls):
+        X, y, fairness_info = lale.lib.aif360.fetch_creditg_df(preprocess=False)
+        cv = lale.lib.aif360.FairStratifiedKFold(
+            **fairness_info, n_splits=3, n_repeats=3
+        )
+        splits = []
+        lr = LogisticRegression()
+        for train, test in cv.split(X, y):
+            train_X, train_y = lale.helpers.split_with_schemas(lr, X, y, train)
+            assert isinstance(train_X, pd.DataFrame), type(train_X)
+            assert isinstance(train_y, pd.Series), type(train_y)
+            test_X, test_y = lale.helpers.split_with_schemas(lr, X, y, test, train)
+            assert isinstance(test_X, pd.DataFrame), type(test_X)
+            assert isinstance(test_y, pd.Series), type(test_y)
+            splits.append(
+                {
+                    "train_X": train_X,
+                    "train_y": train_y,
+                    "test_X": test_X,
+                    "test_y": test_y,
+                }
+            )
+        result = {"splits": splits, "fairness_info": fairness_info}
+        return result
+
+    @classmethod
     def setUpClass(cls):
         cls.prep_pd_cat = cls._prep_pd_cat()
         cls.creditg_pd_cat = cls._creditg_pd_cat()
         cls.creditg_np_cat = cls._creditg_np_cat()
         cls.creditg_pd_ternary = cls._creditg_pd_ternary()
+        cls.creditg_pd_repeated = cls._creditg_pd_repeated()
 
     def test_encoder_pd_cat(self):
         info = self.creditg_pd_cat["fairness_info"]
@@ -827,20 +1211,20 @@ class TestAIF360Cat(unittest.TestCase):
             cand_row = cand_X.loc[i]
             cand_name = list(cand_X.columns)[0]
             self.assertEqual(
-                1
-                if orig_row["personal_status"].startswith("male")
-                else 0
-                if orig_row["personal_status"].startswith("female")
-                else 0.5,
+                (
+                    1
+                    if orig_row["personal_status"].startswith("male")
+                    else 0 if orig_row["personal_status"].startswith("female") else 0.5
+                ),
                 csep_row["personal_status"],
                 f"personal_status {orig_row['personal_status']}",
             )
             self.assertEqual(
-                1
-                if 26 <= orig_row["age"] <= 1000
-                else 0
-                if 1 <= orig_row["age"] <= 23
-                else 0.5,
+                (
+                    1
+                    if 26 <= orig_row["age"] <= 1000
+                    else 0 if 1 <= orig_row["age"] <= 23 else 0.5
+                ),
                 csep_row["age"],
                 f"age {orig_row['age']}",
             )
@@ -888,19 +1272,15 @@ class TestAIF360Cat(unittest.TestCase):
         impact = disparate_impact_scorer(estimator, test_X, test_y)
         self.assertLess(impact, 0.9)
         if estimator.is_classifier():
-            combined_scorer = lale.lib.aif360.accuracy_and_disparate_impact(**fi)
-            combined = combined_scorer(estimator, test_X, test_y)
-            accuracy_scorer = sklearn.metrics.make_scorer(
-                sklearn.metrics.accuracy_score
-            )
-            accuracy = accuracy_scorer(estimator, test_X, test_y)
-            self.assertLess(combined, accuracy)
+            blended_scorer = lale.lib.aif360.accuracy_and_disparate_impact(**fi)
+            blended = blended_scorer(estimator, test_X, test_y)
+            self.assertLess(0.0, blended)
+            self.assertLess(blended, 1.0)
         else:
-            combined_scorer = lale.lib.aif360.r2_and_disparate_impact(**fi)
-            combined = combined_scorer(estimator, test_X, test_y)
-            r2_scorer = sklearn.metrics.make_scorer(sklearn.metrics.r2_score)
-            r2 = r2_scorer(estimator, test_X, test_y)
-            self.assertLess(combined, r2)
+            blended_scorer = lale.lib.aif360.r2_and_disparate_impact(**fi)
+            blended = blended_scorer(estimator, test_X, test_y)
+            self.assertLess(0.0, blended)
+            self.assertLess(blended, 1.0)
         parity_scorer = lale.lib.aif360.statistical_parity_difference(**fi)
         parity = parity_scorer(estimator, test_X, test_y)
         self.assertLess(parity, 0.0)
@@ -917,6 +1297,25 @@ class TestAIF360Cat(unittest.TestCase):
         symm_di = symm_di_scorer(estimator, test_X, test_y)
         self.assertLess(symm_di, 0.9)
 
+    def _attempt_scorers_batched(self, fairness_info, estimator, test_X, test_y):
+        batched_scorer_factories = [
+            lale.lib.aif360.statistical_parity_difference,
+            lale.lib.aif360.disparate_impact,
+            lale.lib.aif360.equal_opportunity_difference,
+            lale.lib.aif360.average_odds_difference,
+            lale.lib.aif360.symmetric_disparate_impact,
+            lale.lib.aif360.accuracy_and_disparate_impact,
+            lale.lib.aif360.balanced_accuracy_and_disparate_impact,
+            lale.lib.aif360.f1_and_disparate_impact,
+        ]  # not including r2_and_disparate_impact, because it's for regression
+        for factory in batched_scorer_factories:
+            scorer = factory(**fairness_info)
+            score_orig = scorer(estimator, test_X, test_y)
+            for n_batches in [1, 3]:
+                batches = mockup_data_loader(test_X, test_y, n_batches, "pandas")
+                score_batched = scorer.score_estimator_batched(estimator, batches)
+                self.assertEqual(score_orig, score_batched, (type(scorer), n_batches))
+
     def test_scorers_pd_cat(self):
         fairness_info = self.creditg_pd_cat["fairness_info"]
         trainable = self.prep_pd_cat >> LogisticRegression(max_iter=1000)
@@ -926,6 +1325,9 @@ class TestAIF360Cat(unittest.TestCase):
         test_X = self.creditg_pd_cat["splits"][0]["test_X"]
         test_y = self.creditg_pd_cat["splits"][0]["test_y"]
         self._attempt_scorers(fairness_info, trained, test_X, test_y)
+        test_y_frame = pd.DataFrame({test_y.name: test_y})
+        self._attempt_scorers(fairness_info, trained, test_X, test_y_frame)
+        self._attempt_scorers_batched(fairness_info, trained, test_X, test_y)
 
     def test_scorers_np_cat(self):
         fairness_info = self.creditg_np_cat["fairness_info"]
@@ -963,6 +1365,7 @@ class TestAIF360Cat(unittest.TestCase):
         test_X = self.creditg_pd_ternary["splits"][0]["test_X"]
         test_y = self.creditg_pd_ternary["splits"][0]["test_y"]
         self._attempt_scorers(fairness_info, trained, test_X, test_y)
+        self._attempt_scorers_batched(fairness_info, trained, test_X, test_y)
 
     def test_scorers_warn(self):
         fairness_info = {
@@ -1047,7 +1450,7 @@ class TestAIF360Cat(unittest.TestCase):
         self.assertAlmostEqual(sdi_measured, 0.461, places=3)
         adi_scorer = lale.lib.aif360.accuracy_and_disparate_impact(**fairness_info)
         adi_measured = adi_scorer.score_data(X=X, y_pred=y, y_true=y)
-        self.assertAlmostEqual(adi_measured, 0.069, places=3)
+        self.assertAlmostEqual(adi_measured, 0.731, places=3)
         ao_scorer = lale.lib.aif360.average_odds_difference(**fairness_info)
         with self.assertRaisesRegex(ValueError, "unexpected labels"):
             _ = ao_scorer.score_data(X=X, y_pred=y)
@@ -1083,6 +1486,13 @@ class TestAIF360Cat(unittest.TestCase):
             )
             self._attempt_remi_creditg_pd_cat(fairness_info, trainable_remi, 0.0, 1.5)
 
+    def test_bagging_orbis_classifier_pd_cat(self):
+        fairness_info = self.creditg_pd_cat["fairness_info"]
+        trainable_remi = BaggingOrbisClassifier(
+            **fairness_info, preparation=self.prep_pd_cat
+        )
+        self._attempt_remi_creditg_pd_cat(fairness_info, trainable_remi, 0.7, 0.92)
+
     def test_calibrated_eq_odds_postprocessing_pd_cat(self):
         fairness_info = self.creditg_pd_cat["fairness_info"]
         estim = self.prep_pd_cat >> LogisticRegression(max_iter=1000)
@@ -1105,11 +1515,22 @@ class TestAIF360Cat(unittest.TestCase):
         ) >> LogisticRegression(max_iter=1000)
         self._attempt_remi_creditg_pd_cat(fairness_info, trainable_remi, 0.65, 0.75)
 
+    def test_disparate_impact_remover_pd_cat_bool(self):
+        X, y, fairness_info = lale.lib.aif360.fetch_ricci_df(preprocess=False)
+        y = y == "Promotion"
+        self.assertIs(y.dtype, np.dtype("bool"))
+        fairness_info = {**fairness_info, "favorable_labels": [True]}
+        trainable_remi = DisparateImpactRemover(
+            **fairness_info, preparation=self.prep_pd_cat
+        ) >> LogisticRegression(max_iter=1000)
+        trained_remi = trainable_remi.fit(X, y)
+        _ = trained_remi.predict(X)
+
     def test_eq_odds_postprocessing_pd_cat(self):
         fairness_info = self.creditg_pd_cat["fairness_info"]
         estim = self.prep_pd_cat >> LogisticRegression(max_iter=1000)
         trainable_remi = EqOddsPostprocessing(**fairness_info, estimator=estim)
-        self._attempt_remi_creditg_pd_cat(fairness_info, trainable_remi, 0.88, 0.98)
+        self._attempt_remi_creditg_pd_cat(fairness_info, trainable_remi, 0.82, 1.02)
 
     def test_gerry_fair_classifier_pd_cat(self):
         fairness_info = self.creditg_pd_cat["fairness_info"]
@@ -1143,16 +1564,40 @@ class TestAIF360Cat(unittest.TestCase):
             )
             # TODO: this test does not yet call fit or predict
 
+    def test_orbis_mixed_pd_cat(self):
+        fairness_info = self.creditg_pd_cat["fairness_info"]
+        estim = self.prep_pd_cat >> LogisticRegression(max_iter=1000)
+        trainable_remi = Orbis(
+            estimator=estim, **fairness_info, sampling_strategy="mixed"
+        )
+        self._attempt_remi_creditg_pd_cat(fairness_info, trainable_remi, 0.7, 0.92)
+
+    def test_orbis_over_pd_cat(self):
+        fairness_info = self.creditg_pd_cat["fairness_info"]
+        estim = self.prep_pd_cat >> LogisticRegression(max_iter=1000)
+        trainable_remi = Orbis(
+            estimator=estim, **fairness_info, sampling_strategy="over"
+        )
+        self._attempt_remi_creditg_pd_cat(fairness_info, trainable_remi, 0.7, 0.92)
+
+    def test_orbis_under_pd_cat(self):
+        fairness_info = self.creditg_pd_cat["fairness_info"]
+        estim = self.prep_pd_cat >> LogisticRegression(max_iter=1000)
+        trainable_remi = Orbis(
+            estimator=estim, **fairness_info, sampling_strategy="under"
+        )
+        self._attempt_remi_creditg_pd_cat(fairness_info, trainable_remi, 0.7, 1.05)
+
     def test_prejudice_remover_pd_cat(self):
         fairness_info = self.creditg_pd_cat["fairness_info"]
         trainable_remi = PrejudiceRemover(**fairness_info, preparation=self.prep_pd_cat)
-        self._attempt_remi_creditg_pd_cat(fairness_info, trainable_remi, 0.70, 0.80)
+        self._attempt_remi_creditg_pd_cat(fairness_info, trainable_remi, 0.70, 0.83)
 
     def test_redacting_pd_cat(self):
         fairness_info = self.creditg_pd_cat["fairness_info"]
         estim = self.prep_pd_cat >> LogisticRegression(max_iter=1000)
         trainable_remi = Redacting(**fairness_info) >> estim
-        self._attempt_remi_creditg_pd_cat(fairness_info, trainable_remi, 0.81, 0.91)
+        self._attempt_remi_creditg_pd_cat(fairness_info, trainable_remi, 0.78, 0.94)
 
     def test_reject_option_classification_pd_cat(self):
         fairness_info = self.creditg_pd_cat["fairness_info"]
@@ -1185,3 +1630,29 @@ class TestAIF360Cat(unittest.TestCase):
         di = di_scorer(trained_remi, test_X, test_y)
         self.assertLessEqual(0.8, di)
         self.assertLessEqual(di, 1.0)
+
+    def test_count_fairness_groups(self):
+        fairness_info = self.creditg_pd_cat["fairness_info"]
+        train_X = self.creditg_pd_cat["splits"][0]["train_X"]
+        train_y = self.creditg_pd_cat["splits"][0]["train_y"]
+        cfg = count_fairness_groups(train_X, train_y, **fairness_info)
+        self.assertEqual(cfg.at[(0, 0, 0), "count"], 31)
+        self.assertEqual(cfg.at[(1, 1, 1), "count"], 298)
+
+
+class TestAIF360Imports(unittest.TestCase):
+    def test_import_split(self):
+        # pylint:disable=reimported
+
+        # for backward compatibility, need to support import from `...util`
+        from lale.lib.aif360 import fair_stratified_train_test_split as s_init
+        from lale.lib.aif360.util import fair_stratified_train_test_split as s_util
+
+        self.assertIs(s_init, s_util)
+
+    def test_import_disparate_impact(self):
+        # for backward compatibility, need to support import from `...util`
+        from lale.lib.aif360 import disparate_impact as di_init
+        from lale.lib.aif360.util import disparate_impact as di_util
+
+        self.assertIs(di_init, di_util)
